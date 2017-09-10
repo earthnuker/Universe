@@ -7,8 +7,8 @@ from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy import Column, Integer, String, DateTime, Boolean
 from datetime import datetime
 import random
-import inspect
 import jinja2
+import os
 from date_time import Clock
 class Ghost(object):
     def __init__(self):
@@ -39,7 +39,7 @@ def split_vessel_name(value):
     else:
         return None,None
 Base = declarative_base()
-engine = create_engine('sqlite:///paradise.db', echo=False)
+engine = create_engine('sqlite:///universe.db', echo=False)
 Session = sessionmaker(bind=engine)
 session = Session()
 class ClassProperty(property):
@@ -162,7 +162,7 @@ class Vessel(Base):
     
     @property
     def forum(self):
-        return [r.dict for r in Forum.find(Forum.host_id==self.id).all()[-10:]]
+        return [r.dict for r in Forum.find(Forum.host_id==self.id).all()]
     
     @property
     def note(self):

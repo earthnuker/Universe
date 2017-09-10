@@ -1,4 +1,3 @@
-import import_snapshot
 import jinja2
 import jinja2.sandbox
 import jinja2.meta
@@ -9,6 +8,9 @@ from vessel import Vessel,Ghost,Forum,split_vessel_name,clean_vessel_name
 from datetime import datetime
 from functools import wraps
 from date_time import Clock
+import os
+if not os.path.isfile("universe.db"):
+    import import_snapshot
 class Cmd_Visitor(jinja2.visitor.NodeTransformer):
     def visit_Getattr(self,node):
         orig_lineno=node.lineno
@@ -21,7 +23,6 @@ class Sandbox(jinja2.sandbox.ImmutableSandboxedEnvironment):
     undefined = jinja2.StrictUndefined
     def call_binop(self, context, operator, left, right):
         if operator=='**':
-            print(left,right)
             if abs(left)>1024 or right>1024:
                 raise jinja2.exceptions.UndefinedError('use of the ** operator is restricted to numbers below 1024')
         return super().call_binop(context, operator, left, right)
@@ -128,6 +129,8 @@ class Cmd_Parser(cmd.Cmd):
             return super().postcmd(stop,line)
         if self.in_program:
             return
+        forum_size=5
+        num_visible=5
         if self.vessel:
             article="your" if self.vessel.parent.owner_id==self.vessel.id else "the"
             paradox="Paradox" if self.vessel.parent.paradox else " "
@@ -137,8 +140,8 @@ class Cmd_Parser(cmd.Cmd):
             if self.vessel.parent.note.strip():
                 print()
                 print(eval_template(self.vessel.parent.note,self.vessel).strip())
-            forum=self.vessel.parent.forum[-5:]
-            if forum:
+            forum=self.location.forum[-forum_size:]
+            if forum and not line.strip().startswith("forum"):
                 print()
                 for message in forum:
                     print(message['rendered'])
@@ -146,20 +149,21 @@ class Cmd_Parser(cmd.Cmd):
             if visible:
                 print()
                 print("You can see:")
-                for vessel in visible[:5]:
+                for vessel in visible[:num_visible]:
                     if vessel.parent_id==self.vessel.id:
                         continue
                     print(" -",vessel.full_name_with_id)
-                if len(visible)>5:
-                    print("And {} more vessels (use *look* to see all)".format(len(visible)-5))
+                if len(visible)>num_visible:
+                    print("And {} more vessels (use *look* to see all)".format(len(visible)-num_visible))
         else:
             print("You are a ghost in the {}".format(self.location.full_name_with_id))
             if self.location.note.strip():
                 print()
                 print(eval_template(self.location.note,self.vessel).strip())
-            forum=self.location.forum[-5:]
-            if forum:
+            forum=self.location.forum[-forum_size:]
+            if forum and not line.strip().startswith("forum"):
                 print()
+                print("Last 5 messages")
                 for message in forum:
                     print(message['rendered'])
         print()
@@ -204,6 +208,18 @@ class Cmd_Parser(cmd.Cmd):
             print("You can see:")
             for vessel in visible:
                 print(" -",vessel.full_name_with_id)
+    
+    def do_forum(self,name):
+        if name:
+            print("forum takes no arguments")
+            return
+        forum=self.vessel.parent.forum
+        if forum:
+            print()
+            for message in forum:
+                print(message['rendered'])
+        else:
+            print("No messages")
     
     def do_inspect(self,name):
         "List details about a vessel."
@@ -444,6 +460,9 @@ class Cmd_Parser(cmd.Cmd):
         target=self.vessel.find_visible(name)
         if target and target.program:
             command = eval_template(target.program,self.vessel)
+            if command.startswith("!"):
+                print("Programs cannot evaluate python code")
+                return
             self.in_program=True
             self.script(command)
             self.in_program=False
@@ -480,6 +499,9 @@ class Cmd_Parser(cmd.Cmd):
             print("Target {} does not exist".format(target_name))
             return
         print("casting the {} ({} -> {}) onto the {}".format(spell,spell_program,spell_command,target.full_name_with_id))
+        if spell_command.startswith("!"):
+            print("Spells cannot evaluate python code")
+            return
         if self.vessel:
             vessel_id=self.vessel.id
         else:
@@ -613,5 +635,7 @@ if __name__=="__main__":
             "warp to haven",
             "exit"
         )
+    elif len(sys.argv)==2 and sys.argv[1].isdigit():
+        Cmd_Parser(int(sys.argv[1])).cmdloop()
     else:
         Cmd_Parser().cmdloop()

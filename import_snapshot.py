@@ -2,9 +2,7 @@ import re
 from dateutil.parser import parse
 from vessel import Vessel,Forum,engine,session
 from tqdm import tqdm
-import jinja2
-import jinja2.sandbox
-import jinja2.meta
+import urllib.request
 import codecs
 program_to_jinja={
     "children count": "vessel.children|length",
@@ -35,8 +33,7 @@ program_to_jinja={
     #"random":"",
 }
 
-def parse_memory_array(filename):
-    data=codecs.open(filename,"r","utf-8").read()
+def parse_memory_array(data):
     value_slices=[]
     for line in data.splitlines():
         if not line.strip():
@@ -66,12 +63,13 @@ def to_jinja(code):
             code=code.replace(chunk," {} ".format(program_to_jinja[chunk]))
             code=code.replace("((","<( ").replace("))"," )>")
     return code
-#data=str(RQ.get("https://raw.githubusercontent.com/XXIIVV/vessel.paradise/master/memory/paradise.ma").content,"utf-8").splitlines()
 Vessel.metadata.drop_all(engine)
 Vessel.metadata.create_all(engine)
+vessel_url="https://raw.githubusercontent.com/XXIIVV/vessel.paradise/master/memory/paradise.ma"
+vessels=str(urllib.request.urlopen(vessel_url).read(),"utf-8")
 id_val=0
 print("Importing Vessels...")
-for id_val,record in enumerate(tqdm(list(parse_memory_array("paradise.ma")),ascii=True)):
+for id_val,record in enumerate(tqdm(list(parse_memory_array(vessels)),ascii=True)):
     record['id']=id_val
     state,parent,owner,created=record['code'].split("-")
     record['parent_id']=int(parent.lstrip("0") or "0")
@@ -90,7 +88,9 @@ for id_val,record in enumerate(tqdm(list(parse_memory_array("paradise.ma")),asci
     Vessel(**record)
 Vessel.update()
 print("Importing Forum...")
-for id_val,record in enumerate(tqdm(list(parse_memory_array("forum.ma")),ascii=True)):
+forum_url="https://raw.githubusercontent.com/XXIIVV/vessel.paradise/master/memory/forum.ma"
+forum=str(urllib.request.urlopen(forum_url).read(),"utf-8")
+for id_val,record in enumerate(tqdm(list(parse_memory_array(forum)),ascii=True)):
     record['from_id']=int(record['from'].lstrip("0") or "0")
     del record['from']
     record['host_id']=int(record['host'].lstrip("0")  or "0")
