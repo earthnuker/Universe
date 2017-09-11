@@ -1,16 +1,24 @@
-import jinja2
-import jinja2.sandbox
-import jinja2.meta
-import cmd
-import sys
-import textwrap
-from vessel import Vessel,Ghost,Forum,split_vessel_name,clean_vessel_name
-from datetime import datetime
-from functools import wraps
-from date_time import Clock
 import os
+import io
+import sys
+import cmd
+import textwrap
+import readline
+import argparse
+
+from functools import wraps
+from datetime import datetime
+
+import jinja2
+import jinja2.meta
+import jinja2.sandbox
+
+from date_time import Clock
+from vessel import Vessel,Ghost,Forum,split_vessel_name,clean_vessel_name
+
 if not os.path.isfile("universe.db"):
     import import_snapshot
+
 class Cmd_Visitor(jinja2.visitor.NodeTransformer):
     def visit_Getattr(self,node):
         orig_lineno=node.lineno
@@ -29,8 +37,23 @@ class Sandbox(jinja2.sandbox.ImmutableSandboxedEnvironment):
     def modifies_known_mutable(self,obj,attr):
         #print(obj,attr)
         return super().modifies_known_mutable(obj,attr)
-    
+
+def lformat(iterable, pattern="{}"):
+    if iterable is None or isinstance(iterable, jinja2.Undefined):
+        return iterable
+    #print <( atlas|lformat("{full_name_with_id} by {owner}")|list )>
+    for value in iterable:
+        if hasattr(value,"dict"):
+            value=value.dict
+        try:
+            if isinstance(value,dict):
+                yield pattern.format(**value)
+            else:
+                yield pattern.format(value)
+        except:
+            continue
 jinja = Sandbox()
+jinja.filters['lformat']=lformat
 
 def eval_template(cmd,vessel,target=None,recursive=False):
     while 1:
@@ -71,27 +94,39 @@ def needs_vessel(func):
     def wrapped(self,*args,**kwargs):
         if not self.vessel:
             print("You do not have a vessel.")
-            print("You need to create something first and then become it")
+            print("You need to *create* something first and then *become* it")
             return
         return func(self,*args,**kwargs)
+    wrapped.needs_vessel=True
     return wrapped
 
 class Cmd_Parser(cmd.Cmd):
-    intro="Universe v0.1"
     prompt="> "
     def __init__(self,location=None,*,test_mode=False):
         self.in_program = False
         self.vessel=None
+        self.forum_size=5
+        self.visible_count=5
         if location is None:
             while True:
                 self.location=Vessel.random()
                 if self.location.locked:
                     continue
+                if self.location.silent:
+                    continue
                 break
         else:
             self.location=Vessel.get(location)
         self.test_mode=test_mode
-        return super(type(self),self).__init__()
+        ret=super(type(self),self).__init__()
+        print("Universe v0.1")
+        print()
+        self.script("look",silent=True)
+        return ret
+    
+    @property
+    def netcat(self):
+        return os.environ.get("NCAT_REMOTE_ADDR",None) or os.environ.get("NCAT_REMOTE_PORT",None)
     
     @property
     def prompt(self):
@@ -120,17 +155,29 @@ class Cmd_Parser(cmd.Cmd):
         except Exception as e:
             if self.test_mode:
                 raise
-            print("Template Error:",e)
+            #print <( atlas|map(attribute='dict')|lformat("{full_name_with_id} by {owner}")|list )>
+            raise
+            print("{}:".format(type(e).__name__),*e.args)
         return ''
     
     def postcmd(self,stop,line):
         Vessel.update()
+        if not line:
+            return
+        if line.split()[0] in ["look","inspect","shell","help","print"]:
+            print()
+            return
+        if getattr(getattr(self,"do_"+line.split()[0].lower(),None),"needs_vessel",None) is not None:
+            if self.vessel is None:
+                print()
+                return
+        if line.startswith("!"):
+            print()
+            return
         if stop:
             return super().postcmd(stop,line)
         if self.in_program:
             return
-        forum_size=5
-        num_visible=5
         if self.vessel:
             article="your" if self.vessel.parent.owner_id==self.vessel.id else "the"
             paradox="Paradox" if self.vessel.parent.paradox else " "
@@ -140,32 +187,36 @@ class Cmd_Parser(cmd.Cmd):
             if self.vessel.parent.note.strip():
                 print()
                 print(eval_template(self.vessel.parent.note,self.vessel).strip())
-            forum=self.location.forum[-forum_size:]
+            forum=self.vessel.parent.forum[-self.forum_size:]
             if forum and not line.strip().startswith("forum"):
                 print()
                 for message in forum:
-                    print(message['rendered'])
+                    msg=message['rendered']
+                    if msg:
+                        print(msg)
             visible=self.vessel.parent.visible
             if visible:
                 print()
                 print("You can see:")
-                for vessel in visible[:num_visible]:
+                for vessel in visible[:self.visible_count]:
                     if vessel.parent_id==self.vessel.id:
                         continue
                     print(" -",vessel.full_name_with_id)
-                if len(visible)>num_visible:
-                    print("And {} more vessels (use *look* to see all)".format(len(visible)-num_visible))
+                if len(visible)>self.visible_count:
+                    print("And {} more vessels (use *look* to see all)".format(len(visible)-self.visible_count))
         else:
             print("You are a ghost in the {}".format(self.location.full_name_with_id))
             if self.location.note.strip():
                 print()
-                print(eval_template(self.location.note,self.vessel).strip())
-            forum=self.location.forum[-forum_size:]
+                print(eval_template(self.location.note,self.vessel or Ghost()).strip())
+            forum=self.location.forum[-self.forum_size:]
             if forum and not line.strip().startswith("forum"):
                 print()
-                print("Last 5 messages")
+                print("Last {} messages".format(self.forum_size))
                 for message in forum:
-                    print(message['rendered'])
+                    msg=message['rendered']
+                    if msg:
+                        print(msg)
         print()
         return super().postcmd(stop,line)
     
@@ -193,7 +244,16 @@ class Cmd_Parser(cmd.Cmd):
             print("Look takes no arguments")
             return
         if self.vessel:
+            article="your" if self.vessel.parent.owner_id==self.vessel.id else "the"
+            paradox="Paradox" if self.vessel.parent.paradox else " "
+            head="You are the {} in {} {} {}".format(self.vessel.full_name_with_id,article,self.vessel.parent.full_name_with_id,paradox).strip()
+            print()
+            print(head)
+            if self.vessel.parent.note.strip():
+                print()
+                print(eval_template(self.vessel.parent.note,self.vessel).strip())
             visible=self.vessel.parent.visible
+            print()
             if not visible:
                 print("You can see nothing")
                 return
@@ -201,7 +261,18 @@ class Cmd_Parser(cmd.Cmd):
             for vessel in visible:
                 print(" -",vessel.full_name_with_id)
         else:
-            visible=self.location.children
+            print("You are a ghost in the {}".format(self.location.full_name_with_id))
+            if self.location.note.strip():
+                print()
+                print(eval_template(self.location.note,self.vessel or Ghost()).strip())
+            forum=self.location.forum[-self.forum_size:]
+            if forum:
+                print()
+                print("Last 5 messages")
+                for message in forum:
+                    print(message['rendered'])
+            visible=self.location.children.all()
+            print()
             if not visible:
                 print("You can see nothing")
                 return
@@ -210,10 +281,14 @@ class Cmd_Parser(cmd.Cmd):
                 print(" -",vessel.full_name_with_id)
     
     def do_forum(self,name):
+        "Print message log"
         if name:
             print("forum takes no arguments")
             return
-        forum=self.vessel.parent.forum
+        if self.vessel:
+            forum=self.vessel.parent.forum
+        else:
+            forum=self.location.forum
         if forum:
             print()
             for message in forum:
@@ -305,13 +380,14 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_become(self,name):
         "Become a visible vessel, the target vessel must be present and visible in the current parent vessel."
+        name=clean_vessel_name(name)
         if self.vessel:
             target=self.vessel.find_visible(name)
             if not target:
                 print("There is no",name,"here")
                 return
         else:
-            target=self.location.find_child(name)
+            target=self.location.find_visible(name)
             if not target:
                 print("There is no",name,"here")
                 return
@@ -321,7 +397,7 @@ class Cmd_Parser(cmd.Cmd):
     @needs_vessel
     def do_enter(self,name):
         "Enter a visible vessel."
-        target=self.vessel.find_visible(name)
+        target=self.vessel.parent.find_visible(name)
         if target:
             print("Entering the",target.full_name_with_id)
             self.vessel.parent_id=target.id
@@ -335,8 +411,11 @@ class Cmd_Parser(cmd.Cmd):
         if name:
             print("Leave takes no arguments")
             return
+        if self.vessel.parent.paradox:
+            print("You cannot leave a Paradox")
+            return
         print("Leaving the",self.vessel.parent.full_name_with_id,"and entering the ",self.vessel.parent.parent.full_name_with_id)
-        self.vessel.parent_id=self.vessel.parent.parent.id
+        self.vessel.parent_id=self.vessel.parent.parent_id
     
     @needs_vessel
     def do_program(self,program):
@@ -364,6 +443,7 @@ class Cmd_Parser(cmd.Cmd):
     
     @needs_vessel
     def do_fold(self,name):
+        "Fold your vessel into itself, creating a paradox"
         if name:
             print("Fold takes no arguments")
             return
@@ -386,15 +466,17 @@ class Cmd_Parser(cmd.Cmd):
         self.vessel.parent_id=vessel.id
     
     def do_print(self,name):
+        "Prints it's arguments, useful for messages or testing programs"
         if name:
             print(name)
     
-    def do_shell(self,cmd):
-        try:
-            print(eval(cmd))
-        except Exception as e:
-            print("Error:",e)
-    
+    if not netcat.fget(netcat):
+        def do_shell(self,cmd):
+            "Evaluate python code"
+            try:
+                print(eval(cmd))
+            except Exception as e:
+                print("Error:",e)
     
     def do_locate(self,name):
         "Locates a vessel by name"
@@ -522,10 +604,21 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_signal(self,name):
         "Broadcast your current visible parent vessel."
-        if name:
-            print("Signal takes no arguments")
-            return
-        msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=str(self.vessel.parent.id))
+        name=name.strip().title()
+        if name.isnumeric():
+            if not Vessel.get(int(name)):
+                print("Target vessel does not exist")
+                return
+            msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=name)
+        elif name:
+            vessel=Vessel.find_distant(name)
+            if vessel:
+                msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=str(vessel.id))
+            else:
+                print("Invalid argument")
+                return
+        else:
+            msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=str(self.vessel.parent.id))
         print(msg.str)
     
     def do_emote(self,message):
@@ -536,6 +629,7 @@ class Cmd_Parser(cmd.Cmd):
         return
     
     def do_help(self,name):
+        "Prints help."
         if name.startswith("with "):
             name=name.replace("with ","")
         
@@ -545,7 +639,18 @@ class Cmd_Parser(cmd.Cmd):
         print(textwrap.dedent("""
         Wildcards are dynamic text to be used in notes and programs to create responsive narratives.
         
-        Wildcards get evaluated as Jinja2 Templates
+        Wildcards get evaluated as Jinja2 Templates with the following Variables defined:
+        
+        'vessel': your current vessel,
+        'universe': a list of all existing vessels,
+        'atlas': a list of all paradoxes,
+        'spells': a list of all vessels that can be cast as spells,
+        'tunnels': a list of all tunnel vessels,
+        'time': the current time and date in the nataniev time-system (http://wiki.xxiivv.com/Clock),
+        'nataniev': a function for retrieving the nataniev time and date for a different timezone,
+        'find': function for locating vessels by name or ID,
+        'taget': target of a spell program (only defined when casting a spell)
+        
         Examples:
             <(vessel.name)> # return the name of the current vessel
             <(vessel.id)> # return the id of the current vessel
@@ -585,18 +690,26 @@ class Cmd_Parser(cmd.Cmd):
     def help_programming(self):
         print(textwrap.dedent("""
         A Vessel program is a piece of text containing wildcards that is evaluated,
-        when a vessel is used with the 'use' command.
+        when a vessel is used with the 'use' command. ('help with wildcards' for more info)
         An example program to check if the using vessel has a specific key could be:
         <( 'warp '~vessel.random.id if ('warpgate key' in vessel.children|map(attribute='full_name')) else 'print you need a key to use this warpgate' )>
         """).lstrip())
     
     def do_exit(self,arg):
+        "exits"
         return True
     
     def do_EOF(self,args):
+        "End of file, exits"
         return True
+
+arg_parser = argparse.ArgumentParser()
+group = arg_parser.add_mutually_exclusive_group()
+group.add_argument("-t","--test",action="store_true",help="Run test suite")
+arg_parser.add_argument("location",type=int,help="Start location (default=random)",default=None,nargs='?')
+args=arg_parser.parse_args()
 if __name__=="__main__":
-    if len(sys.argv)==2 and sys.argv[1]=="test":
+    if args.test:
         Cmd_Parser(20,test_mode=True).script(
             "create a test vessel",
             "become a test vessel",
@@ -635,7 +748,5 @@ if __name__=="__main__":
             "warp to haven",
             "exit"
         )
-    elif len(sys.argv)==2 and sys.argv[1].isdigit():
-        Cmd_Parser(int(sys.argv[1])).cmdloop()
-    else:
-        Cmd_Parser().cmdloop()
+    Cmd_Parser(args.location).cmdloop()
+    

@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import relationship, backref, validates
-from sqlalchemy.orm.session import sessionmaker
+from sqlalchemy.orm import sessionmaker,scoped_session
 from sqlalchemy.schema import ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -23,6 +23,7 @@ class Ghost(object):
         return "<Ghost Vessel>"
 
 articles=["into","some","the","a","an","one","to","in"]
+question_words=["are","is","does","who","what","where","when","how","why","which"]
 def clean_vessel_name(value):
     for w in articles:
         value=value.replace(" {} ".format(w)," ")
@@ -40,8 +41,8 @@ def split_vessel_name(value):
         return None,None
 Base = declarative_base()
 engine = create_engine('sqlite:///universe.db', echo=False)
-Session = sessionmaker(bind=engine)
-session = Session()
+session = scoped_session(sessionmaker(bind=engine))
+
 class ClassProperty(property):
     def __get__(self, cls, owner):
         return self.fget.__get__(None, owner)()
@@ -108,10 +109,21 @@ class Forum(Base):
     
     @property
     def str(self):
+        if not self.message:
+            return None
         if self.message.startswith("me "):
-            return "[{}] The {} {}".format(self.timestamp,self.from_vessel.full_name_with_id,self.message[3:])
-        return "[{}] The {} said '{}'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message)
-    
+            ret="[{}] The {} {}".format(self.timestamp,self.from_vessel.full_name_with_id,self.message[3:])
+        elif self.message.split()[0].lower() in question_words:
+            ret="[{}] The {} asked '{}?'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message.rstrip('?'))
+        elif self.message.endswith("!"):
+            ret="[{}] The {} shouted '{}!'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message.rstrip('!'))
+        elif self.message.isnumeric():
+            msg_vessel=Vessel.get(int(self.message))
+            ret="[{}] The {} indicated the {}".format(self.timestamp,self.from_vessel.full_name_with_id,msg_vessel.full_name_with_id)
+        else:
+            ret="[{}] The {} said '{}.'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message.rstrip('.'))
+        return ret
+        
 class Vessel(Base):
     __tablename__ = "vessels"
     id = Column(Integer,primary_key=True)
@@ -167,7 +179,7 @@ class Vessel(Base):
     @property
     def note(self):
         note=self.raw_note
-        for vessel in self.siblings:
+        for vessel in self.visible:
             template="[{}]"
             if vessel.program:
                 template="^"+template
@@ -216,7 +228,14 @@ class Vessel(Base):
     def find_visible(self,name):
         if not name:
             return None
+        if name.isnumeric():
+            name=int(name)
         visible=self.visible
+        if isinstance(name,int):
+            for vessel in visible:
+                if vessel.id==name:
+                    return vessel
+            return
         attr,name=split_vessel_name(name.lower())
         for vessel in visible:
             if vessel.name.lower()==name and vessel.attr.lower()==attr:
@@ -224,7 +243,10 @@ class Vessel(Base):
         for vessel in visible:
             if vessel.name.lower()==name:
                 return vessel
-    
+        for vessel in visible:
+            if vessel.attr.lower()==name:
+                return vessel
+
     def find_child(self,name):
         if not name:
             return None
@@ -240,14 +262,17 @@ class Vessel(Base):
                 if vessel.parent.silent:
                     continue
                 return vessel
-    
+        for vessel in children:
+            if vessel.attr.lower()==name:
+                return vessel
+
     @classmethod
     def find_random(cls):
         return cls.random()
     
     @classmethod
     def find_distant(cls,name):
-        if name=='':
+        if not name:
             return None
         try:
             return cls.get(int(name))
@@ -261,6 +286,9 @@ class Vessel(Base):
         for vessel in vessels:
             if vessel.name.lower()==name:
                 return vessel
+        for vessel in vessels:
+            if vessel.attr.lower()==name:
+                return vessel
     
     @classmethod
     def random(cls,*query_t,num=1):
@@ -273,12 +301,11 @@ class Vessel(Base):
         return session.query(*query_t).filter(Vessel.id.in_(ids)).all()
     
     def random_child(self,num=1):
-        assert isinstance(self,Vessel)
-        if not self.children:
+        if not self.children.count():
             return None
-        res=random.sample(self.children,num)
+        res=random.sample(self.children.all(),num)
         if num==1:
-            return res[0]
+            return res and res[0]
         return res
     
     def __repr__(self):
@@ -292,11 +319,12 @@ class Vessel(Base):
     def dict(self):
         cols=self.cols.copy()
         cols['parent']=self.parent
+        cols['owner']=self.owner
         cols['children']=self.children.all()
         cols['num_children']=len(cols['children'])
         cols['siblings']=self.siblings.all()
         cols['num_siblings']=len(cols['siblings'])
-        cols['visible']=self.siblings.all()
+        cols['visible']=self.visible
         cols['num_visible']=len(cols['visible'])
         cols['stem']=self.stem
         cols['paradox']=self.paradox
@@ -305,6 +333,7 @@ class Vessel(Base):
         cols['full_name']=self.full_name
         cols['full_name_with_id']=self.full_name_with_id
         cols['random']=self.random()
+        cols['random_child']=self.random_child()
         return cols
     
     @property
