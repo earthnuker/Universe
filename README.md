@@ -4,7 +4,7 @@ Run `main.py` to load the data and drop into an interactive shell
 
 Use `help` for help
 
-To run it so that other can connect via Telnet run
+To run it so that others can connect via Telnet run
 `ncat -t -k -v -l -e "python main.py" 3777`
 (needs ncat from the nmap package)
 
