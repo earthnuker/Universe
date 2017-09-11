@@ -171,7 +171,7 @@ class Cmd_Parser(cmd.Cmd):
             if self.vessel is None:
                 print()
                 return
-        if line.startswith("!"):
+        if line.startswith("!") or line.split()[0]=="shell":
             print()
             return
         if stop:
@@ -542,7 +542,7 @@ class Cmd_Parser(cmd.Cmd):
         target=self.vessel.find_visible(name)
         if target and target.program:
             command = eval_template(target.program,self.vessel)
-            if command.startswith("!"):
+            if command.startswith("!") or command.split()[0]=="shell":
                 print("Programs cannot evaluate python code")
                 return
             self.in_program=True
@@ -708,6 +708,7 @@ group = arg_parser.add_mutually_exclusive_group()
 group.add_argument("-t","--test",action="store_true",help="Run test suite")
 arg_parser.add_argument("location",type=int,help="Start location (default=random)",default=None,nargs='?')
 args=arg_parser.parse_args()
+
 if __name__=="__main__":
     if args.test:
         Cmd_Parser(20,test_mode=True).script(
