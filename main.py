@@ -224,7 +224,6 @@ class Cmd_Parser(cmd.Cmd):
         return
     
     def default(self,cmd):
-        print("CMD:",cmd)
         if not cmd:
             return ''
         assert not self.test_mode
