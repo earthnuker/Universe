@@ -681,7 +681,7 @@ class Cmd_Parser(cmd.Cmd):
         'time': the current time and date in the nataniev time-system (http://wiki.xxiivv.com/Clock),
         'nataniev': a function for retrieving the nataniev time and date for a different timezone,
         'find': function for locating vessels by name or ID,
-        'taget': target of a spell program (only defined when casting a spell)
+        'target': target of a spell program (only defined when casting a spell)
         
         Examples:
             <(vessel.name)> # return the name of the current vessel
