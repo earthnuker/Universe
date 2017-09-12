@@ -1,6 +1,8 @@
-Run `main.py test` to run the test suite
+Run `main.py -t` to run the test suite
 
 Run `main.py` to load the data and drop into an interactive shell
+
+Run `main.py -h` for help
 
 Use `help` for help
 
