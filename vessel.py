@@ -395,13 +395,12 @@ class Vessel(Base):
     def atlas(cls):
         ret=[]
         for vessel in cls.find(cls.id==cls.parent_id).all():
-            if vessel.locked:
-                continue
-            if vessel.hidden:
-                continue
-            if vessel.rating<50:
-                continue
-            if vessel.id<1:
+            if any([
+                vessel.locked,
+                vessel.hidden,
+                vessel.rating<50,
+                vessel.id<1,
+            ]):
                 continue
             ret.append(vessel)
         return ret
