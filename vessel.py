@@ -19,6 +19,7 @@ class Ghost(object):
         self.locked,self.hidden,self.silent,self.tunnel=False,False,False,False
         self.children,self.siblings,self.visible,self.owned=[],[],[],[]
         self.created=datetime.now()
+        self.rating=0
     def __repr__(self):
         return "<Ghost Vessel>"
 
@@ -32,13 +33,11 @@ def clean_vessel_name(value):
             value=value[len(w)+1:]
     return value.strip()
 def split_vessel_name(value):
-    value=clean_vessel_name(value).split()
-    if len(value):
-        *attr,name=value
+    if value:
+        *attr,name=clean_vessel_name(value).split()
         attr=" ".join(attr).strip()
         return attr,name
-    else:
-        return None,None
+    return "",""
 Base = declarative_base()
 engine = create_engine('sqlite:///universe.db', echo=False)
 session = scoped_session(sessionmaker(bind=engine))
@@ -174,19 +173,28 @@ class Vessel(Base):
     
     @property
     def forum(self):
+        if self.silent:
+            return []
         return [r.dict for r in Forum.find(Forum.host_id==self.id).all()]
     
     @property
     def note(self):
+        tagged=[]
         note=self.raw_note
-        for vessel in self.visible:
-            template="[{}]"
+        for vessel in self.find(Vessel.tunnel==True):
+            if vessel.id in tagged:
+                continue
+            tagged.append(vessel.id)
+            template="|{}|"
             if vessel.program:
                 template="^"+template
             if vessel.full_name:
                 note=note.replace(vessel.full_name,template.format(vessel.full_name))
-        for vessel in type(self).tunnels:
-            template="|{}|"
+        for vessel in self.visible:
+            if vessel.id in tagged:
+                continue
+            tagged.append(vessel.id)
+            template="[{}]"
             if vessel.program:
                 template="^"+template
             if vessel.full_name:
@@ -201,20 +209,24 @@ class Vessel(Base):
     def children(self):
         query=(
             (Vessel.parent_id==self.id) &\
-            (Vessel.id != self.id) & \
-            (((Vessel.owner_id == self.owner_id) | (Vessel.owner_id == self.id)) | (not self.silent))
+            (Vessel.id != self.id)
         )
-        return Vessel.find(query)
+        if self.silent:
+            return Vessel.find(query).filter((Vessel.owner_id == self.owner_id) | (Vessel.owner_id == self.id))
+        else:
+            return Vessel.find(query)
     
     @property
     def siblings(self):
         query=(
             (Vessel.parent_id==self.parent_id) &\
             (Vessel.id != self.parent_id) & \
-            (Vessel.id != self.id) & \
-            (((Vessel.owner_id == self.owner_id) | (Vessel.owner_id == self.id)) | (not self.parent.silent))
+            (Vessel.id != self.id)
         )
-        return Vessel.find(query)
+        if self.silent:
+            return Vessel.find(query).filter((Vessel.owner_id == self.owner_id) | (Vessel.owner_id == self.id))
+        else:
+            return Vessel.find(query)
     
     @property
     def visible(self):
@@ -295,6 +307,8 @@ class Vessel(Base):
         if not query_t:
             query_t=(Vessel,)
         cnt=session.query(Vessel).count()
+        if not cnt:
+            return Ghost()
         ids=random.sample(range(cnt),num)
         if num==1:
             return session.query(*query_t).filter(Vessel.id==ids[0]).one()
@@ -379,12 +393,30 @@ class Vessel(Base):
     @ClassProperty
     @classmethod
     def atlas(cls):
-        return cls.find(cls.id==cls.parent_id).all()
+        ret=[]
+        for vessel in cls.find(cls.id==cls.parent_id).all():
+            if vessel.locked:
+                continue
+            if vessel.hidden:
+                continue
+            if vessel.rating<50:
+                continue
+            if vessel.id<1:
+                continue
+            ret.append(vessel)
+        return ret
     
     @ClassProperty
     @classmethod
     def tunnels(cls):
-        return cls.find(cls.tunnel==True).all()
+        ret=[]
+        for vessel in cls.find(Vessel.hidden==False).filter(Vessel.locked==True).all():
+            for vessel in cls.find(Vessel.tunnel==True):
+                if not vessel.full_name.lower() in vessel.raw_note.lower():
+                    break
+            else:
+                ret.append(vessel)
+        return ret
     
     @ClassProperty
     @classmethod
@@ -413,6 +445,17 @@ class Vessel(Base):
             if V.id in L:
                 return None
         return V
+    
+    def __setattr__(self,name,value):
+        #print("Set",name,value)
+        try:
+            if name in self.dict:
+                if self.locked and name!="locked":
+                    print("The {} is locked and may not be modified".format(self.full_name_with_id))
+                    return
+        except AttributeError:
+            pass
+        return super().__setattr__(name,value)
     
     @property
     def depth(self):

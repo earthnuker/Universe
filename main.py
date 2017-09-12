@@ -34,14 +34,10 @@ class Sandbox(jinja2.sandbox.ImmutableSandboxedEnvironment):
             if abs(left)>1024 or right>1024:
                 raise jinja2.exceptions.UndefinedError('use of the ** operator is restricted to numbers below 1024')
         return super().call_binop(context, operator, left, right)
-    def modifies_known_mutable(self,obj,attr):
-        #print(obj,attr)
-        return super().modifies_known_mutable(obj,attr)
 
 def lformat(iterable, pattern="{}"):
     if iterable is None or isinstance(iterable, jinja2.Undefined):
         return iterable
-    #print <( atlas|lformat("{full_name_with_id} by {owner}")|list )>
     for value in iterable:
         if hasattr(value,"dict"):
             value=value.dict
@@ -106,22 +102,32 @@ class Cmd_Parser(cmd.Cmd):
         self.in_program = False
         self.vessel=None
         self.forum_size=5
-        self.visible_count=5
-        if location is None:
+        if test_mode:
+            self.visible_count=None
+        else:
+            self.visible_count=5
+        if location is not None:
+            if isinstance(location,Vessel):
+                self.vessel=location
+            else:
+                self.location=Vessel.get(location)
+        else:
             while True:
                 self.location=Vessel.random()
-                if self.location.locked:
-                    continue
-                if self.location.silent:
+                if any([
+                    self.location.locked,
+                    self.location.hidden,
+                    self.location.rating<50,
+                    self.location.id<1,
+                    ]):
                     continue
                 break
-        else:
-            self.location=Vessel.get(location)
         self.test_mode=test_mode
-        ret=super(type(self),self).__init__()
+        ret=super().__init__()
         print("Universe v0.1")
         print()
         self.script("look",silent=True)
+        print(self.vessel,self.location)
         return ret
     
     @property
@@ -155,7 +161,6 @@ class Cmd_Parser(cmd.Cmd):
         except Exception as e:
             if self.test_mode:
                 raise
-            #print <( atlas|map(attribute='dict')|lformat("{full_name_with_id} by {owner}")|list )>
             raise
             print("{}:".format(type(e).__name__),*e.args)
         return ''
@@ -194,16 +199,19 @@ class Cmd_Parser(cmd.Cmd):
                     msg=message['rendered']
                     if msg:
                         print(msg)
-            visible=self.vessel.parent.visible
+            visible=self.vessel.visible
+            visible_short=visible[:self.visible_count]
             if visible:
                 print()
                 print("You can see:")
-                for vessel in visible[:self.visible_count]:
+                for vessel in visible_short:
                     if vessel.parent_id==self.vessel.id:
                         continue
+                    if not vessel.name:
+                        continue
                     print(" -",vessel.full_name_with_id)
-                if len(visible)>self.visible_count:
-                    print("And {} more vessels (use *look* to see all)".format(len(visible)-self.visible_count))
+                if len(visible)>len(visible_short):
+                    print("And {} more vessels (use *look* to see all)".format(len(visible)-len(visible_short)))
         else:
             print("You are a ghost in the {}".format(self.location.full_name_with_id))
             if self.location.note.strip():
@@ -251,7 +259,7 @@ class Cmd_Parser(cmd.Cmd):
             if self.vessel.parent.note.strip():
                 print()
                 print(eval_template(self.vessel.parent.note,self.vessel).strip())
-            visible=self.vessel.parent.visible
+            visible=self.vessel.visible
             print()
             if not visible:
                 print("You can see nothing")
@@ -267,7 +275,7 @@ class Cmd_Parser(cmd.Cmd):
             forum=self.location.forum[-self.forum_size:]
             if forum:
                 print()
-                print("Last 5 messages")
+                print("Last {} messages".format(len(forum)))
                 for message in forum:
                     print(message['rendered'])
             visible=self.location.children.all()
@@ -297,7 +305,6 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_inspect(self,name):
         "List details about a vessel."
-        #print(self.location.find_visible(None))
         vessel=None
         if self.vessel:
             vessel=self.vessel.parent
@@ -316,13 +323,21 @@ class Cmd_Parser(cmd.Cmd):
         print()
         print("The {}".format(vessel.full_name_with_id))
         print("="*len("The {}".format(vessel.full_name_with_id)))
-        print("The {} is owned by the {}, has a rating of {}".format(vessel.full_name,vessel.owner.full_name_with_id,vessel.rating),end="")
-        if vessel.stem.id!=vessel.id:
-            print(" and is currently {} levels deep within the {} paradox".format(vessel.depth,vessel.stem.full_name))
+        if vessel.owner:
+            print("The {} is owned by the {}, has a rating of {}".format(vessel.full_name,vessel.owner.full_name_with_id,vessel.rating),end="")
         else:
-            print(" and is a paradox".format(vessel.full_name))
-        if vessel.stem.id!=vessel.id:
-            print("Stem:",vessel.stem)
+            print("The {} is owned by nobody, has a rating of {}".format(vessel.full_name,vessel.rating),end="")
+        if vessel.stem:
+            if vessel.stem.id!=vessel.id:
+                depth=vessel.depth
+                if depth>1:
+                    print(" and is currently {} levels deep within the {} paradox".format(vessel.depth,vessel.stem.full_name))
+                else:
+                    print(" and is currently {} level deep within the {} paradox".format(vessel.depth,vessel.stem.full_name))
+            else:
+                print(" and is a paradox".format(vessel.full_name))
+            if vessel.stem.id!=vessel.id:
+                print("Stem:",vessel.stem)
         if vessel.note:
             print("Note:",repr(vessel.note))
         if vessel.program:
@@ -340,10 +355,10 @@ class Cmd_Parser(cmd.Cmd):
             if not n:
                 print("Siblings:")
             print(" -",sibling.full_name_with_id)
-        for n,sibling in enumerate(vessel.children):
+        for n,child in enumerate(vessel.children):
             if not n:
                 print("Children:")
-            print(" -",sibling.full_name_with_id)
+            print(" -",child.full_name_with_id)
         for n,visible in enumerate(vessel.visible):
             if not n:
                 print("Visible:")
@@ -357,6 +372,7 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_create(self,name):
         "Create a new vessel at your current location."
+        name = clean_vessel_name(name)
         if self.vessel:
             target=self.vessel.find_visible(name)
             if target:
@@ -396,6 +412,7 @@ class Cmd_Parser(cmd.Cmd):
     @needs_vessel
     def do_enter(self,name):
         "Enter a visible vessel."
+        name = clean_vessel_name(name)
         target=self.vessel.parent.find_visible(name)
         if target:
             print("Entering the",target.full_name_with_id)
@@ -422,7 +439,7 @@ class Cmd_Parser(cmd.Cmd):
         if self.vessel.parent.owner_id==self.vessel.id:
             self.vessel.parent.program=program
         else:
-            print("You do not own",self.vessel.parent.full_name)
+            print("You do not own the",self.vessel.parent.full_name)
     
     @needs_vessel
     def do_note(self,note):
@@ -430,14 +447,7 @@ class Cmd_Parser(cmd.Cmd):
         if self.vessel.parent.owner_id==self.vessel.id:
             self.vessel.parent.raw_note=note
         else:
-            print("You do not own",self.vessel.parent.full_name)
-    
-    @needs_vessel
-    def do_transform(self,name):
-        "Change your current vessel name and attribute."
-        attr,name=split_vessel_name(name)
-        self.vessel.attr=attr
-        self.vessel.name=name
+            print("You do not own the",self.vessel.parent.full_name)
     
     
     @needs_vessel
@@ -460,6 +470,9 @@ class Cmd_Parser(cmd.Cmd):
                 vessel=Vessel.find_distant(name)
         if not vessel:
             print("Target vessel not found")
+            return
+        if vessel.hidden:
+            print("Target is hidden and may not be warped into")
             return
         print("Warping to {}".format(vessel.full_name_with_id))
         self.vessel.parent_id=vessel.id
@@ -498,10 +511,16 @@ class Cmd_Parser(cmd.Cmd):
             else:
                 print("Invalid value: {}".format(value))
                 return
-            if self.vessel.parent.owner_id==self.vessel.id:
-                setattr(self.parent,attr,value)
+            if self.in_program:
+                if self.vessel.owner_id==self.vessel.id:
+                    setattr(self.vessel,attr,value)
+                else:
+                    print("You do not own the {}".format(self.vessel.full_name_with_id))
             else:
-                print("You do not own the {}".format(self.vessel.parent.full_name_with_id))
+                if self.vessel.parent.owner_id==self.vessel.id:
+                    setattr(self.vessel.parent,attr,value)
+                else:
+                    print("You do not own the {}".format(self.vessel.parent.full_name_with_id))
             return
         print("Invalid attribute: {}".format(attr))
     
@@ -509,27 +528,20 @@ class Cmd_Parser(cmd.Cmd):
     @needs_vessel
     def do_take(self,name):
         "Move a visible vessel into your current vessel."
+        name = clean_vessel_name(name)
         target=self.vessel.find_visible(name)
         if target:
-            if target.locked:
-                print("The",name,"is locked")
-                return
-            if target.owner_id==self.vessel.id:
-                target.parent_id=self.vessel.id
-                print("You took the",target.full_name)
-            else:
-                print("You do not own the",target.full_name)
+            target.parent_id=self.vessel.id
+            print("You took the",target.full_name)
         else:
             print("There is no",name,"here")
     
     @needs_vessel
     def do_drop(self,name):
         "Move a visible vessel out of your current vessel into your parent vessel."
-        target=self.vessel.find_child(name)
+        name = clean_vessel_name(name)
+        target = self.vessel.find_child(name)
         if target:
-            if self.vessel.parent.locked:
-                print("The",self.vessel.parent.full_name,"is locked")
-                return
             target.parent_id=self.vessel.parent_id
             print("You dropped the",target.full_name)
         else:
@@ -538,6 +550,7 @@ class Cmd_Parser(cmd.Cmd):
     @needs_vessel
     def do_use(self,name):
         "Execute a vessels program"
+        name = clean_vessel_name(name)
         target=self.vessel.find_visible(name)
         if target and target.program:
             command = eval_template(target.program,self.vessel)
@@ -553,6 +566,7 @@ class Cmd_Parser(cmd.Cmd):
     @needs_vessel
     def do_transform(self,name):
         "Change your current vessel's name and attribute"
+        name = clean_vessel_name(name)
         attr,name=split_vessel_name(name)
         self.vessel.attr=attr
         self.vessel.name=name
@@ -579,8 +593,11 @@ class Cmd_Parser(cmd.Cmd):
         if not target:
             print("Target {} does not exist".format(target_name))
             return
-        print("casting the {} ({} -> {}) onto the {}".format(spell,spell_program,spell_command,target.full_name_with_id))
-        if spell_command.startswith("!"):
+        if spell_command!=spell_program:
+            print("casting the {} ({} -> {}) onto the {}".format(spell,spell_program,spell_command,target.full_name_with_id))
+        else:
+            print("casting the {} ({}) onto the {}".format(spell,spell_command,target.full_name_with_id))
+        if spell_command.startswith("!") and hasattr(self,"do_shell"):
             print("Spells cannot evaluate python code")
             return
         if self.vessel:
@@ -595,6 +612,9 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_say(self,message):
         "Add a message into the global dialog."
+        if self.vessel.parent.silent:
+            print("The {} is silent, you may not talk here",format(self.vessel.parent.full_name))
+            return
         message=message.strip()
         if message:
             msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=message)
@@ -603,14 +623,23 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_signal(self,name):
         "Broadcast your current visible parent vessel."
+        if self.vessel.parent.silent:
+            print("The {} is silent, you may not talk here".format(self.vessel.parent.full_name))
+            return
         name=name.strip().title()
         if name.isnumeric():
             if not Vessel.get(int(name)):
                 print("Target vessel does not exist")
                 return
+            if Vessel.get(int(name)).hidden:
+                print("The {} is hidden".format(Vessel.get(int(name)).full_name))
+                return
             msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=name)
         elif name:
             vessel=Vessel.find_distant(name)
+            if vessel.hidden:
+                print("The {} is hidden".format(vessel.full_name))
+                return
             if vessel:
                 msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=str(vessel.id))
             else:
@@ -622,9 +651,13 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_emote(self,message):
         "Add an emote message into the global dialog."
+        if self.vessel.parent.silent:
+            print("The {} is silent, you may not talk here",format(self.vessel.parent.full_name))
+            return
         if message:
             message="me "+message.strip()
             msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=message)
+            print(msg.str)
         return
     
     def do_help(self,name):
@@ -703,17 +736,32 @@ class Cmd_Parser(cmd.Cmd):
         return True
 
 arg_parser = argparse.ArgumentParser()
-group = arg_parser.add_mutually_exclusive_group()
-group.add_argument("-t","--test",action="store_true",help="Run test suite")
-arg_parser.add_argument("location",type=int,help="Start location (default=random)",default=None,nargs='?')
+arg_parser.add_argument("-t","--test",action="store_true",help="Run test suite")
+arg_parser.add_argument("-i","--do_import",action="store_true",help="Reset Database and import Snapshot")
+arg_parser.add_argument("-n","--no_interactive",action="store_true",help="Do not start interactive prompt")
+arg_parser.add_argument("location",type=int,help="Start location (default=random) or (if running commands) vessel",default=None,nargs='?')
+arg_parser.add_argument("commands",type=str,help="Command to run",default=None,nargs='*')
 args=arg_parser.parse_args()
 
 if __name__=="__main__":
+    print(args)
+    if args.test or args.do_import:
+        import import_snapshot
+    if args.location and args.commands:
+        args.location=Vessel.find(Vessel.id==args.location).one()
+    parser=Cmd_Parser(args.location)
+    if args.commands:
+        parser.script(*args.commands)
     if args.test:
-        Cmd_Parser(20,test_mode=True).script(
-            "create a test vessel",
-            "become a test vessel",
+        parser=Cmd_Parser(20)
+        parser.vessel=None
+        parser.script(
+            "create a unit tester",
+            "become a unit tester",
             "warp to 19",
+            "!exec('self.vessel.parent.locked=False')",
+            "!exec('self.vessel.parent.silent=False')",
+            "!exec('self.vessel.parent.locked=True')",
             "create a benchmark tool",
             "enter the benchmark tool",
             "leave",
@@ -748,5 +796,5 @@ if __name__=="__main__":
             "warp to haven",
             "exit"
         )
-    Cmd_Parser(args.location).cmdloop()
-    
+    elif not args.no_interactive:
+        parser.cmdloop()
