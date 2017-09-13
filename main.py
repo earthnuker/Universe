@@ -5,7 +5,7 @@ import cmd
 import textwrap
 import readline
 import argparse
-
+import traceback
 from functools import wraps
 from datetime import datetime
 
@@ -14,7 +14,8 @@ import jinja2.meta
 import jinja2.sandbox
 
 from date_time import Clock
-from vessel import Vessel,Ghost,Forum,split_vessel_name,clean_vessel_name
+from vessel import Vessel,Ghost,Forum,InvalidVesselException
+from vessel import split_vessel_name,clean_vessel_name
 
 if not os.path.isfile("universe.db"):
     import import_snapshot
@@ -73,7 +74,11 @@ def eval_template(cmd,vessel,target=None,recursive=False):
         }
         if target:
             args['target']=target
-        template=jinja.parse(cmd)
+        try:
+            template=jinja.parse(cmd)
+        except:
+            print(cmd)
+            raise
         template=Cmd_Visitor().visit(template)
         template=template.set_environment(jinja)
         for var in jinja2.meta.find_undeclared_variables(template):
@@ -127,7 +132,6 @@ class Cmd_Parser(cmd.Cmd):
         print("Universe v0.1")
         print()
         self.script("look",silent=True)
-        print(self.vessel,self.location)
         return ret
     
     @property
@@ -337,7 +341,9 @@ class Cmd_Parser(cmd.Cmd):
             else:
                 print(" and is a paradox".format(vessel.full_name))
             if vessel.stem.id!=vessel.id:
-                print("Stem:",vessel.stem)
+                print("Stem:",vessel.stem.full_name_with_id)
+        if vessel.parent.id!=vessel.id:
+            print("Parent:",vessel.parent.full_name_with_id)
         if vessel.note:
             print("Note:",repr(vessel.note))
         if vessel.program:
@@ -383,7 +389,12 @@ class Cmd_Parser(cmd.Cmd):
             if target:
                 print("There is already a {} here".format(target.name))
                 return
-        V=Vessel(name)
+        try:
+            V=Vessel(name)
+        except InvalidVesselException as e:
+            for err in e.args:
+                print(err)
+            return
         if self.vessel:
             V.owner_id=self.vessel.id
             V.parent_id=self.vessel.parent_id
@@ -488,7 +499,7 @@ class Cmd_Parser(cmd.Cmd):
             try:
                 print(eval(cmd))
             except Exception as e:
-                print("Error:",e)
+                traceback.print_exception(*sys.exc_info(),file=sys.stdout)
     
     def do_locate(self,name):
         "Locates a vessel by name"
@@ -604,11 +615,23 @@ class Cmd_Parser(cmd.Cmd):
             vessel_id=self.vessel.id
         else:
             vessel_id=None
+        locked=target.locked
+        target.locked=False
+        owner_changed=False
+        if target.owner.id==self.vessel.id:
+            target.owner_id=target.id
+            owner_changed=True
+        target.locked=locked
         self.vessel=target
         self.in_program=True
         self.script(spell_command)
         self.in_program=False
         self.vessel=Vessel.get(vessel_id)
+        locked=target.locked
+        target.locked=False
+        if owner_changed:
+            target.owner_id=self.vessel.id
+        target.locked=locked
     
     def do_say(self,message):
         "Add a message into the global dialog."
@@ -740,11 +763,10 @@ arg_parser.add_argument("-t","--test",action="store_true",help="Run test suite")
 arg_parser.add_argument("-i","--do_import",action="store_true",help="Reset Database and import Snapshot")
 arg_parser.add_argument("-n","--no_interactive",action="store_true",help="Do not start interactive prompt")
 arg_parser.add_argument("location",type=int,help="Start location (default=random) or (if running commands) vessel",default=None,nargs='?')
-arg_parser.add_argument("commands",type=str,help="Command to run",default=None,nargs='*')
+arg_parser.add_argument("commands",type=str,help="Commands to run",default=None,nargs='*')
 args=arg_parser.parse_args()
 
 if __name__=="__main__":
-    print(args)
     if args.test or args.do_import:
         import import_snapshot
     if args.location and args.commands:

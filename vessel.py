@@ -10,6 +10,8 @@ import random
 import jinja2
 import os
 from date_time import Clock
+class InvalidVesselException(Exception):
+    pass
 class Ghost(object):
     def __init__(self):
         self.name="ghost"
@@ -147,8 +149,25 @@ class Vessel(Base):
             kwargs['name']=name
             kwargs['attr']=attr
             args=tuple()
-        super().__init__(*args,**kwargs)
+        try:
+            super().__init__(*args,**kwargs)
+        except AssertionError as e:
+            raise InvalidVesselException(*e.args)
         session.add(self)
+    
+    @validates('name','attr')
+    def __check(self, key, value):
+        if key=="attr" and value=="":
+            return value
+        assert 2<len(value)<16,"Vessel {} has to be between 4 and 16 characters".format(key.replace("attr","attribute"))
+        return value
+    
+    @property
+    def has_errors(self):
+        checks=[
+            (2<len(self.full_name)<30,"The vessel attribute and name has to be between 5 and 30 characters combined"),
+        ]
+        return [msg for c,msg in checks if not c]
     
     def commit(self):
         session.commit()
@@ -188,7 +207,7 @@ class Vessel(Base):
             template="|{}|"
             if vessel.program:
                 template="^"+template
-            if vessel.full_name:
+            if len(vessel.full_name)>5:
                 note=note.replace(vessel.full_name,template.format(vessel.full_name))
         for vessel in self.visible:
             if vessel.id in tagged:
@@ -197,7 +216,7 @@ class Vessel(Base):
             template="[{}]"
             if vessel.program:
                 template="^"+template
-            if vessel.full_name:
+            if len(vessel.full_name)>5:
                 note=note.replace(vessel.full_name,template.format(vessel.full_name))
         return note
     
@@ -208,8 +227,9 @@ class Vessel(Base):
     @property
     def children(self):
         query=(
-            (Vessel.parent_id==self.id) &\
-            (Vessel.id != self.id)
+            (Vessel.parent_id==self.id) & \
+            (Vessel.id != self.id) & \
+            (Vessel.name!="")
         )
         if self.silent:
             return Vessel.find(query).filter((Vessel.owner_id == self.owner_id) | (Vessel.owner_id == self.id))
@@ -219,9 +239,10 @@ class Vessel(Base):
     @property
     def siblings(self):
         query=(
-            (Vessel.parent_id==self.parent_id) &\
+            (Vessel.parent_id==self.parent_id) & \
             (Vessel.id != self.parent_id) & \
-            (Vessel.id != self.id)
+            (Vessel.id != self.id) & \
+            (Vessel.name!="")
         )
         if self.silent:
             return Vessel.find(query).filter((Vessel.owner_id == self.owner_id) | (Vessel.owner_id == self.id))
@@ -242,7 +263,15 @@ class Vessel(Base):
             return None
         if name.isnumeric():
             name=int(name)
-        visible=self.visible
+        tunnel_list=Vessel.find(Vessel.tunnel==True).all()
+        tunnels=[]
+        for tunnel in tunnel_list:
+            if tunnel.full_name.strip():
+                if self.raw_note.lower().find(tunnel.full_name.lower())!=-1:
+                    tunnels.append(tunnel)
+        if self.tunnel:
+            tunnels+=Vessel.tunnels()
+        visible=self.visible+tunnels
         if isinstance(name,int):
             for vessel in visible:
                 if vessel.id==name:
@@ -409,12 +438,13 @@ class Vessel(Base):
     @classmethod
     def tunnels(cls):
         ret=[]
-        for vessel in cls.find(Vessel.hidden==False).filter(Vessel.locked==True).all():
-            for vessel in cls.find(Vessel.tunnel==True):
-                if not vessel.full_name.lower() in vessel.raw_note.lower():
-                    break
-            else:
-                ret.append(vessel)
+        tunnel_list=cls.find(cls.tunnel==True).all()
+        for vessel in cls.find(cls.hidden==False).filter(cls.locked==True).all():
+            for tunnel in tunnel_list:
+                if tunnel.full_name.strip():
+                    if vessel.raw_note.lower().find(tunnel.full_name.lower())!=-1:
+                        ret.append(vessel)
+                        break
         return ret
     
     @ClassProperty
@@ -425,7 +455,7 @@ class Vessel(Base):
     @ClassProperty
     @classmethod
     def universe(cls):
-        return session.query(cls).all()
+        return cls.find().all()
     
     
     @hybrid_property

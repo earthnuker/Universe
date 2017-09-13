@@ -1,6 +1,6 @@
 import re
 from dateutil.parser import parse
-from vessel import Vessel,Forum,engine,session
+from vessel import Vessel,Forum,InvalidVesselException,engine,session
 from tqdm import tqdm
 import urllib.request
 import codecs
@@ -68,6 +68,7 @@ Vessel.metadata.create_all(engine)
 vessel_url="https://raw.githubusercontent.com/XXIIVV/vessel.paradise/master/memory/paradise.ma"
 vessels=str(urllib.request.urlopen(vessel_url).read(),"utf-8")
 id_val=0
+dropped=0
 print("Importing Vessels...")
 for id_val,record in enumerate(tqdm(list(parse_memory_array(vessels)),ascii=True)):
     record['id']=id_val
@@ -85,8 +86,22 @@ for id_val,record in enumerate(tqdm(list(parse_memory_array(vessels)),ascii=True
     for k,v in record.items():
         if isinstance(v,str):
             record[k]=to_jinja(v)
-    Vessel(**record)
+    try:
+        Vessel(**record)
+    except InvalidVesselException:
+        dropped+=1
+    """
+    if " ".join([record['attr'],record['name']]).strip():
+        Vessel(**record)
+    else:
+        dropped+=1
+    """
 Vessel.update()
+for v in Vessel.universe:
+    if v.parent is None:
+        print(v)
+print("Dropped {} Vessels".format(dropped))
+dropped=0
 print("Importing Forum...")
 forum_url="https://raw.githubusercontent.com/XXIIVV/vessel.paradise/master/memory/forum.ma"
 forum=str(urllib.request.urlopen(forum_url).read(),"utf-8")
@@ -100,5 +115,9 @@ for id_val,record in enumerate(tqdm(list(parse_memory_array(forum)),ascii=True))
     if record['timestamp_raw']:
         record['timestamp_raw']=parse(record['timestamp_raw'])
     record['id']=id_val
-    Forum(**record)
+    try:
+        Forum(**record)
+    except AssertionError:
+        dropped+=1
 Forum.update()
+print("Dropped {} Messages".format(dropped))
