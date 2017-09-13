@@ -338,10 +338,15 @@ class Vessel(Base):
         cnt=session.query(Vessel).count()
         if not cnt:
             return Ghost()
-        ids=random.sample(range(cnt),num)
-        if num==1:
-            return session.query(*query_t).filter(Vessel.id==ids[0]).one()
-        return session.query(*query_t).filter(Vessel.id.in_(ids)).all()
+        res=[]
+        while len(res)!=num:
+            id_n=random.choice(range(cnt))
+            V=Vessel.get(id_n)
+            if V is not None:
+                res.append(V)
+        if len(res)==1:
+            return res[0]
+        return res
     
     def random_child(self,num=1):
         if not self.children.count():

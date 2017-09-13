@@ -2,6 +2,7 @@ import os
 import io
 import sys
 import cmd
+import codecs
 import textwrap
 import readline
 import argparse
@@ -103,6 +104,7 @@ def needs_vessel(func):
 
 class Cmd_Parser(cmd.Cmd):
     prompt="> "
+    use_rawinput=True
     def __init__(self,location=None,*,test_mode=False):
         self.in_program = False
         self.vessel=None
@@ -132,6 +134,10 @@ class Cmd_Parser(cmd.Cmd):
         print("Universe v0.1")
         print()
         self.script("look",silent=True)
+        if self.vessel:
+            self.prev_loc=self.vessel.parent
+        else:
+            self.prev_loc=self.location
         return ret
     
     @property
@@ -188,6 +194,10 @@ class Cmd_Parser(cmd.Cmd):
         if self.in_program:
             return
         if self.vessel:
+            if self.prev_loc==self.vessel.parent:
+                print()
+                return
+            self.prev_loc=self.vessel.parent
             article="your" if self.vessel.parent.owner_id==self.vessel.id else "the"
             paradox="Paradox" if self.vessel.parent.paradox else " "
             head="You are the {} in {} {} {}".format(self.vessel.full_name_with_id,article,self.vessel.parent.full_name_with_id,paradox).strip()
@@ -216,7 +226,11 @@ class Cmd_Parser(cmd.Cmd):
                     print(" -",vessel.full_name_with_id)
                 if len(visible)>len(visible_short):
                     print("And {} more vessels (use *look* to see all)".format(len(visible)-len(visible_short)))
-        else:
+        elif self.location:
+            if self.prev_loc==self.location:
+                print()
+                return
+            self.prev_loc=self.location
             print("You are a ghost in the {}".format(self.location.full_name_with_id))
             if self.location.note.strip():
                 print()
@@ -819,4 +833,9 @@ if __name__=="__main__":
             "exit"
         )
     elif not args.no_interactive:
-        parser.cmdloop()
+        while 1:
+            try:
+                parser.cmdloop()
+                break
+            except Exception as e:
+                print("Error:",*e.args)
