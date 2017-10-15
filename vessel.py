@@ -116,11 +116,19 @@ class Forum(Base):
             ret="[{}] The {} {}".format(self.timestamp,self.from_vessel.full_name_with_id,self.message[3:])
         elif self.message.split()[0].lower() in question_words:
             ret="[{}] The {} asked '{}?'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message.rstrip('?'))
+        elif self.message.endswith("?"):
+            ret="[{}] The {} asked '{}?'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message.rstrip('?'))
         elif self.message.endswith("!"):
             ret="[{}] The {} shouted '{}!'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message.rstrip('!'))
         elif self.message.isnumeric():
-            msg_vessel=Vessel.get(int(self.message))
-            ret="[{}] The {} indicated the {}".format(self.timestamp,self.from_vessel.full_name_with_id,msg_vessel.full_name_with_id)
+            try:
+                msg_vessel=Vessel.get(int(self.message))
+            except:
+                msg_vessel=None
+            if msg_vessel:
+                ret="[{}] The {} indicated the {}".format(self.timestamp,self.from_vessel.full_name_with_id,msg_vessel.full_name_with_id)
+            else:
+                ret="[{}] The {} said '{}.'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message.rstrip('.'))
         else:
             ret="[{}] The {} said '{}.'".format(self.timestamp,self.from_vessel.full_name_with_id,self.message.rstrip('.'))
         return ret
