@@ -67,10 +67,9 @@ Vessel.metadata.drop_all(engine)
 Vessel.metadata.create_all(engine)
 vessel_url="https://raw.githubusercontent.com/XXIIVV/vessel.paradise/master/memory/paradise.ma"
 vessels=str(urllib.request.urlopen(vessel_url).read(),"utf-8")
-id_val=0
 dropped=0
 print("Importing Vessels...")
-for id_val,record in enumerate(tqdm(list(parse_memory_array(vessels)),ascii=True)):
+for id_val,record in enumerate(tqdm(list(parse_memory_array(vessels)),ascii=True,disable=False)):
     record['id']=id_val
     state,parent,owner,created=record['code'].split("-")
     record['parent_id']=int(parent.lstrip("0") or "0")
@@ -86,9 +85,13 @@ for id_val,record in enumerate(tqdm(list(parse_memory_array(vessels)),ascii=True
     for k,v in record.items():
         if isinstance(v,str):
             record[k]=to_jinja(v)
+    if not record['name']:
+        record['name']="nullspace"
     try:
-        Vessel(**record)
-    except InvalidVesselException:
+        orig_locked=record['locked']
+        record['locked']=False
+        Vessel(**record).locked=orig_locked
+    except InvalidVesselException as e:
         dropped+=1
     """
     if " ".join([record['attr'],record['name']]).strip():
@@ -99,7 +102,8 @@ for id_val,record in enumerate(tqdm(list(parse_memory_array(vessels)),ascii=True
 Vessel.update()
 for v in Vessel.universe:
     if v.parent is None:
-        print(v)
+        v.parent_id=0
+Vessel.update()
 print("Dropped {} Vessels".format(dropped))
 dropped=0
 print("Importing Forum...")

@@ -1,25 +1,36 @@
+print("Loading...")
 import os
 import io
 import sys
 import cmd
+import base64
 import codecs
+import random
 import textwrap
 import readline
 import argparse
 import traceback
 from functools import wraps
 from datetime import datetime
-
+import code
+try:
+    import lupa # scripting
+    import lupa._lupa # scripting
+    has_lua=True
+    LUA_LIMIT=1e8
+except ImportError:
+    lua=None
+    has_lua=False
 import jinja2
 import jinja2.meta
 import jinja2.sandbox
 
 from date_time import Clock
 from vessel import Vessel,Ghost,Forum,InvalidVesselException
-from vessel import split_vessel_name,clean_vessel_name
+from vessel import split_vessel_name,clean_vessel_name,engine
 
-if not os.path.isfile("universe.db"):
-    import import_snapshot
+#if not os.path.isfile("universe.db"):
+#    import import_snapshot
 
 class Cmd_Visitor(jinja2.visitor.NodeTransformer):
     def visit_Getattr(self,node):
@@ -53,7 +64,13 @@ def lformat(iterable, pattern="{}"):
 jinja = Sandbox()
 jinja.filters['lformat']=lformat
 
-def eval_template(cmd,vessel,target=None,recursive=False):
+def eval_template(parser,cmd,vessel,target=None,recursive=False):
+    if cmd.startswith("lua:"):
+        cmd=bytes(cmd[4:],"utf-8")
+        cmd=base64.b32decode(cmd)
+        cmd=str(cmd,"utf-8")
+        res,ns,err=lua_eval(cmd,parser)
+        return None
     while 1:
         vessel=vessel or Ghost()
         old_cmd=cmd
@@ -65,6 +82,7 @@ def eval_template(cmd,vessel,target=None,recursive=False):
         T_now=datetime.today()
         args={
             'vessel':vessel,
+            'location':((lambda:parser.vessel.parent) if parser.vessel else (lambda:parser.location))(),
             'universe':Vessel.universe,
             'atlas':Vessel.atlas,
             'spells':Vessel.spells,
@@ -119,18 +137,25 @@ class Cmd_Parser(cmd.Cmd):
             else:
                 self.location=Vessel.get(location)
         else:
-            while True:
-                self.location=Vessel.random()
+            VL=Vessel.find().all()
+            random.shuffle(VL)
+            for self.location in VL:
                 if any([
                     self.location.locked,
                     self.location.hidden,
                     self.location.rating<50,
                     self.location.id<1,
+                    self.location.parent is None,
                     ]):
                     continue
                 break
+            else:
+                print("No suitable Location found, picking a random one...")
+                self.location=Vessel.random()
         self.test_mode=test_mode
         ret=super().__init__()
+        if self.conninfo:
+            print("[{}] Got connection from {}:{}".format(datetime.now(),*self.conninfo),file=sys.stderr)
         print("Universe v0.1")
         print()
         self.script("look",silent=True)
@@ -141,18 +166,34 @@ class Cmd_Parser(cmd.Cmd):
         return ret
     
     @property
+    def conninfo(self):
+        nc=(os.environ.get("NCAT_REMOTE_ADDR",None),os.environ.get("NCAT_REMOTE_PORT",None))
+        ssh=os.environ.get("SSH_CONNECTION",None)
+        if all(nc):
+            return nc
+        elif ssh:
+            return tuple(ssh.split(" ")[:2])
+    
+    @property
     def netcat(self):
-        return os.environ.get("NCAT_REMOTE_ADDR",None) or os.environ.get("NCAT_REMOTE_PORT",None)
+        return all((os.environ.get("NCAT_REMOTE_ADDR",None),os.environ.get("NCAT_REMOTE_PORT",None)))
+    
+    @property
+    def ssh(self):
+        return all(tuple(os.environ.get("SSH_CONNECTION",None).split(" ")[:2]))
+    
     
     @property
     def prompt(self):
         prompt=""
         if self.vessel:
-            prompt="{}@{}".format(self.vessel.id,self.vessel.parent_id)
+            prompt="[{}@{}]".format(self.vessel.id,self.vessel.parent_id)
+            if self.vessel.paradox:
+                prompt="[{}]".format(self.vessel.id,self.vessel.parent_id)
         elif self.location:
-            prompt="None@{}".format(self.location.id)
+            prompt="[(None)@{}]".format(self.location.id)
         if self.in_program:
-            prompt="(program){}".format(prompt)
+            prompt="[(program){}]".format(prompt)
         return "{}> ".format(prompt)
     
     def cmdloop(self):
@@ -160,14 +201,18 @@ class Cmd_Parser(cmd.Cmd):
         return super(type(self),self).cmdloop(self.intro)
     
     def precmd(self,line):
+        line=line.strip()
         if not line:
             return line
         Vessel.update()
+        if self.conninfo:
+            host,port=self.conninfo
+            print("[{}] {}:{}|{}{}".format(datetime.now(),host,port,self.prompt,line),file=sys.stderr)
         cmd=line.split()[0]
         if cmd in ["program","note"]:
             return line
         try:
-            return eval_template(line,self.vessel)
+            return eval_template(self,line,self.vessel)
         except Exception as e:
             if self.test_mode:
                 raise
@@ -200,12 +245,15 @@ class Cmd_Parser(cmd.Cmd):
             self.prev_loc=self.vessel.parent
             article="your" if self.vessel.parent.owner_id==self.vessel.id else "the"
             paradox="Paradox" if self.vessel.parent.paradox else " "
-            head="You are the {} in {} {} {}".format(self.vessel.full_name_with_id,article,self.vessel.parent.full_name_with_id,paradox).strip()
+            if self.vessel==self.vessel.parent:
+                head="You are a paradox of {} {}".format(article,self.vessel.full_name_with_id).strip()
+            else:
+                head="You are the {} in {} {} {}".format(self.vessel.full_name_with_id,article,self.vessel.parent.full_name_with_id,paradox).strip()
             print()
             print(head)
             if self.vessel.parent.note.strip():
                 print()
-                print(eval_template(self.vessel.parent.note,self.vessel).strip())
+                print(eval_template(self,self.vessel.parent.note,self.vessel).strip())
             forum=self.vessel.parent.forum[-self.forum_size:]
             if forum and not line.strip().startswith("forum"):
                 print()
@@ -231,10 +279,13 @@ class Cmd_Parser(cmd.Cmd):
                 print()
                 return
             self.prev_loc=self.location
-            print("You are a ghost in the {}".format(self.location.full_name_with_id))
+            if self.location.paradox:
+                print("You are a ghost in the {} Paradox".format(self.location.full_name_with_id))
+            else:
+                print("You are a ghost in the {}".format(self.location.full_name_with_id))
             if self.location.note.strip():
                 print()
-                print(eval_template(self.location.note,self.vessel or Ghost()).strip())
+                print(eval_template(self,self.location.note,self.vessel or Ghost()).strip())
             forum=self.location.forum[-self.forum_size:]
             if forum and not line.strip().startswith("forum"):
                 print()
@@ -256,13 +307,14 @@ class Cmd_Parser(cmd.Cmd):
         super(type(self),self).default(cmd)
     
     def script(self,*args,silent=False):
+        self.in_program=True
         for line in args:
             if not silent:
                 print("{}{}".format(self.prompt,line))
             line=self.precmd(line)
             stop=self.onecmd(line)
             stop=self.postcmd(stop,line)
-    
+        self.in_program=False
     def do_look(self,name):
         "Lists all visible Vessels."
         if name:
@@ -271,12 +323,15 @@ class Cmd_Parser(cmd.Cmd):
         if self.vessel:
             article="your" if self.vessel.parent.owner_id==self.vessel.id else "the"
             paradox="Paradox" if self.vessel.parent.paradox else " "
-            head="You are the {} in {} {} {}".format(self.vessel.full_name_with_id,article,self.vessel.parent.full_name_with_id,paradox).strip()
+            if self.vessel==self.vessel.parent:
+                head="You are a paradox of {} {}".format(article,self.vessel.full_name_with_id).strip()
+            else:
+                head="You are the {} in {} {} {}".format(self.vessel.full_name_with_id,article,self.vessel.parent.full_name_with_id,paradox).strip()
             print()
             print(head)
             if self.vessel.parent.note.strip():
                 print()
-                print(eval_template(self.vessel.parent.note,self.vessel).strip())
+                print(eval_template(self,self.vessel.parent.note,self.vessel).strip())
             visible=self.vessel.visible
             print()
             if not visible:
@@ -286,10 +341,13 @@ class Cmd_Parser(cmd.Cmd):
             for vessel in visible:
                 print(" -",vessel.full_name_with_id)
         else:
-            print("You are a ghost in the {}".format(self.location.full_name_with_id))
+            if self.location.paradox:
+                print("You are a ghost in the {} Paradox".format(self.location.full_name_with_id))
+            else:
+                print("You are a ghost in the {}".format(self.location.full_name_with_id))
             if self.location.note.strip():
                 print()
-                print(eval_template(self.location.note,self.vessel or Ghost()).strip())
+                print(eval_template(self,self.location.note,self.vessel or Ghost()).strip())
             forum=self.location.forum[-self.forum_size:]
             if forum:
                 print()
@@ -467,6 +525,24 @@ class Cmd_Parser(cmd.Cmd):
             print("You do not own the",self.vessel.parent.full_name)
     
     @needs_vessel
+    def do_program_lua(self,args):
+        "Add an automation program to a vessel, making it available to the use command. ('help with programming' for more info)"
+        if self.vessel.parent.owner_id==self.vessel.id:
+            code=[]
+            if args:
+                code=[args]
+            else:
+                while 1:
+                    line=input("lua:>")
+                    if not line:
+                        break
+                    code+=[line]
+            code="\n".join(code)
+            self.vessel.parent.program=str(b"lua:"+base64.b32encode(bytes(code,"utf-8")),"utf-8")
+        else:
+            print("You do not own the",self.vessel.parent.full_name)
+    
+    @needs_vessel
     def do_note(self,note):
         "Add a description to the current parent vessel."
         if self.vessel.parent.owner_id==self.vessel.id:
@@ -503,15 +579,21 @@ class Cmd_Parser(cmd.Cmd):
         self.vessel.parent_id=vessel.id
     
     def do_print(self,name):
-        "Prints it's arguments, useful for messages or testing programs"
+        "Prints its arguments, useful for messages or testing programs"
         if name:
             print(name)
     
-    if not netcat.fget(netcat):
+    if not conninfo.fget(conninfo):
         def do_shell(self,cmd):
-            "Evaluate python code"
+            "Evaluate python code or drop into an interactive shell"
+            if not cmd:
+                try:
+                    code.interact(banner="Welcome to the debug console, don't break anything...",local=globals(),exitmsg="Bye!")
+                except SystemExit:
+                    print("Bye!")
+                return
             try:
-                print(eval(cmd))
+                print(eval(cmd,globals(),locals()))
             except Exception as e:
                 traceback.print_exception(*sys.exc_info(),file=sys.stdout)
     
@@ -525,7 +607,14 @@ class Cmd_Parser(cmd.Cmd):
     
     @needs_vessel
     def do_set(self,name):
-        "Directly write attributes for a owned vessel, the set command is meant to be used with programs and casted as spells."
+        """
+        Directly write attributes for a owned vessel, the set command is meant to be used with programs and casted as spells.
+        Attributes that can be set are:
+         - locked: prevent modification to the vessel
+         - hidden: prevent warping into the vessel
+         - silent: prevent using the chat/forum in the vessel
+         - tunnel: make the vessel accessible from other vessels notes
+        """
         attr,value=name.split()
         if attr in ["is_{}".format(flag) for flag in ("locked","hidden","silent","tunnel")]:
             attr=attr[3:]
@@ -577,10 +666,12 @@ class Cmd_Parser(cmd.Cmd):
         "Execute a vessels program"
         name = clean_vessel_name(name)
         target=self.vessel.find_visible(name)
-        if target and target.program:
-            command = eval_template(target.program,self.vessel)
-            if command.startswith("!") or command.split()[0]=="shell":
-                print("Programs cannot evaluate python code")
+        if target:
+            if not target.program:
+                print("Target does not have a program")
+                return
+            command = eval_template(self,target.program,self.vessel)
+            if not command:
                 return
             self.in_program=True
             self.script(command)
@@ -595,6 +686,24 @@ class Cmd_Parser(cmd.Cmd):
         attr,name=split_vessel_name(name)
         self.vessel.attr=attr
         self.vessel.name=name
+    
+    def do_lua(self,args):
+        """Execute Lua code"""
+        code=[]
+        if args:
+            code=[args]
+        else:
+            while 1:
+                line=input("lua:>")
+                if not line:
+                    break
+                code+=[line]
+        code="\n".join(lua_code)
+        err,ns,res=lua_eval(code,self)
+        if err:
+            print(res)
+        else:
+            print("Result:",res)
     
     @needs_vessel
     def do_cast(self,name):
@@ -611,7 +720,10 @@ class Cmd_Parser(cmd.Cmd):
             target=self.vessel
         try:
             spell_program=next(filter(lambda vessel:vessel.full_name==spell,Vessel.spells)).program
-            spell_command=eval_template(spell_program,self.vessel,target)
+            if not spell_program.strip():
+                print("Spell vessel does not have a program associated with it")
+                return
+            spell_command=eval_template(self,spell_program,self.vessel,target)
         except StopIteration:
             print("The {} does not exist".format(spell))
             return
@@ -622,7 +734,7 @@ class Cmd_Parser(cmd.Cmd):
             print("casting the {} ({} -> {}) onto the {}".format(spell,spell_program,spell_command,target.full_name_with_id))
         else:
             print("casting the {} ({}) onto the {}".format(spell,spell_command,target.full_name_with_id))
-        if spell_command.startswith("!") and hasattr(self,"do_shell"):
+        if (spell_command.startswith("!") or spell_command.startswith("shell")) and hasattr(self,"do_shell"):
             print("Spells cannot evaluate python code")
             return
         if self.vessel:
@@ -731,7 +843,7 @@ class Cmd_Parser(cmd.Cmd):
     def help_spells(self):
         print(textwrap.dedent("""
         Spells are programs that can be activated from any location by using the 'cast' command.
-        A program needs to be programmed, locked, and have the '<something> spell' format to qualify.
+        A spell vessel needs to be programmed, locked, and have the '<something> spell' name format to qualify.
         Once a spell has been crafted, it can be used with the cast action, from anywhere, by all players.
         Spells can also be cast onto other vessels which makes their program execute in the context of the vessel the spell is cast onto.
         """).lstrip())
@@ -776,16 +888,142 @@ arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("-t","--test",action="store_true",help="Run test suite")
 arg_parser.add_argument("-i","--do_import",action="store_true",help="Reset Database and import Snapshot")
 arg_parser.add_argument("-n","--no_interactive",action="store_true",help="Do not start interactive prompt")
-arg_parser.add_argument("location",type=int,help="Start location (default=random) or (if running commands) vessel",default=None,nargs='?')
+arg_parser.add_argument("-v","--vessel",action="store_true",help="location is a vessel")
+arg_parser.add_argument("-j","--json",action="store_true",help="json output")
+arg_parser.add_argument("-e","--empty",action="store_true",help="start with an empty universe (except for ID 0)")
+arg_parser.add_argument("-l","--location",type=int,help="Start location (default=random) or vessel",default=None)
 arg_parser.add_argument("commands",type=str,help="Commands to run",default=None,nargs='*')
 args=arg_parser.parse_args()
+#args.json=False
+import json
+class VesselEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Vessel):
+            out={"forum":[msg for msg in obj.forum]}
+            for k,v in obj.dict.items():
+                print(k,v)
+                if isinstance(v,Vessel):
+                    out[k]=v.id
+                elif (not isinstance(v,(str,bytes,dict))) and hasattr(v,"__iter__"):
+                    l=[]
+                    for i in v:
+                        if isinstance(i,Vessel):
+                            l.append(i.id)
+                        else:
+                            l.append(i)
+                    out[k]=l
+                else:
+                    out[k]=v
+            print(out)
+            return out
+        if isinstance(obj, Forum):
+            return obj.dict
+        return json.JSONEncoder.default(self, obj)
+def serialize(data):
+    return json.dumps(data,cls=VesselEncoder,sort_keys=True,indent=4)
 
+def lua_eval(code,parser):
+    global lua,lua_globals
+    if not has_lua:
+        raise NotImplementedError("lupa module not loaded")
+    g=lua_globals
+    g_old=list(g.items())
+    allowed=['math','table','type','ipairs','error','tostring','unpack','print']
+    for k in g:
+        if k in allowed:
+            continue
+        del g[k]
+    def to_id_map(data):
+        return {v.id:v for v in data}
+    g_upd={
+        'int':int,
+        'int_s':lambda v:str(int(v)),
+        'format':lambda s,*f:s.format(*f),
+        'timeout':timeout,
+        'template':lambda s:eval_template(parser,s,parser.vessel),
+        'parser':parser,
+        'parser_cls':type(parser),
+        'cmd':lambda *cmds:parser.script(*cmds,silent=False),
+        'py_print':print,
+        'vessel':parser.vessel,
+        'location':((lambda:parser.vessel.parent) if parser.vessel else (lambda:parser.location))(),
+        'universe':to_id_map(Vessel.universe),
+        'atlas':to_id_map(Vessel.atlas),
+        'spells':to_id_map(Vessel.spells),
+        'tunnels':to_id_map(Vessel.tunnels),
+        'time':Clock().as_dict(),
+        'nataniev':lambda tz:Clock(tz).as_dict(),
+        'find':lambda id_n:Vessel.find_distant(id_n),
+    }
+    for k,v in g_upd.items():
+        g[k]=v
+    g_old+=list(g.items())
+    err=False
+    try:
+        res=lua.execute(code)
+    except Exception as e:
+        res=e
+        err=True
+    for k,v in g_old:
+        if g[k]==v:
+            del g[k]
+    return err,dict(g),res
 if __name__=="__main__":
+    if has_lua:
+        def lua_getter(obj,attr):
+            if attr.startswith("_"):
+                raise AttributeError("not allowed to read attribute {}".format(attr))
+            return getattr(obj,attr)
+        def lua_setter(obj, attr, value):
+            if isinstance(obj,Vessel):
+                if attr in obj.cols:
+                    return obj.__setattr__(attr,value)
+            if isinstance(obj,CmdParser):
+                if attr.startswith("do_"):
+                    return obj.__setattr__(attr,value)
+            raise AttributeError("not allowed to write attribute {}".format(attr))
+        lupa_config={
+            "attribute_handlers":(lua_getter, lua_setter)
+            "register_eval":False,
+            "register_builtins":False,
+            "unpack_returned_tuples":True,
+        }
+        lua=lupa.LuaRuntime(**lupa_config)
+        def timeout(message):
+            raise TimeoutError(message)
+        debug=lua.require("debug")
+        debug.sethook(lua.compile("timeout('Lua code execution timed out')"),"",LUA_LIMIT)
+        lua_globals=lua.globals()
     if args.test or args.do_import:
         import import_snapshot
-    if args.location and args.commands:
-        args.location=Vessel.find(Vessel.id==args.location).one()
+    if args.empty:
+        Vessel.metadata.drop_all(engine)
+        Vessel.metadata.create_all(engine)
+        Forum.metadata.drop_all(engine)
+        Forum.metadata.create_all(engine)
+        Vessel( # create root vessel
+            id=0,
+            attr="central",
+            name="nexus",
+            raw_note="The central anchor point of the universe, nothing to see here, go build something",
+            locked=True,
+            silent=False,
+            parent_id=0,
+            owner_id=0,
+        )
+    if args.json:
+        #sys.stdout=open(os.devnull,"w")
+        #sys.stderr=open(os.devnull,"w")
+        #stream=open(1,"w")
+        args.no_interactive=True
+    if ((args.location is not None) and args.vessel):
+        args.location=Vessel.get(args.location)
     parser=Cmd_Parser(args.location)
+    if args.json:
+        import pprint
+        pprint.pprint((parser.vessel or parser.location).dict)
+        #print(serialize(parser.vessel or parser.location),file=stream)
+    #exit()
     if args.commands:
         parser.script(*args.commands)
     if args.test:
@@ -839,3 +1077,4 @@ if __name__=="__main__":
                 break
             except Exception as e:
                 print("Error:",*e.args)
+                raise

@@ -134,9 +134,9 @@ class Vessel(Base):
     program = Column(String,default="")
     
     parent_id = Column(Integer,ForeignKey('vessels.id'),default=None)
-    _children = relationship("Vessel",primaryjoin =('Vessel.id == Vessel.parent_id'),backref=backref('parent', remote_side=[id]))
+    _children = relationship("Vessel",primaryjoin =('Vessel.id == Vessel.parent_id'),backref=backref('parent', remote_side=[id]),post_update=True)
     owner_id = Column(Integer,ForeignKey('vessels.id'),default=None)
-    owned = relationship("Vessel",primaryjoin =('Vessel.id == Vessel.owner_id'),backref=backref('owner', remote_side=[id]))
+    owned = relationship("Vessel",primaryjoin =('Vessel.id == Vessel.owner_id'),backref=backref('owner', remote_side=[id]),post_update=True)
     created_raw = Column("created",DateTime,nullable=True,default=datetime.now)
     locked = Column(Boolean,default=False)
     hidden = Column(Boolean,default=False)
@@ -159,7 +159,7 @@ class Vessel(Base):
     def __check(self, key, value):
         if key=="attr" and value=="":
             return value
-        assert 2<len(value)<16,"Vessel {} has to be between 4 and 16 characters".format(key.replace("attr","attribute"))
+        assert 2<len(value)<16,"Vessel {} has to be between 3 and 15 characters".format(key.replace("attr","attribute"))
         return value
     
     @property
@@ -207,7 +207,7 @@ class Vessel(Base):
             template="|{}|"
             if vessel.program:
                 template="^"+template
-            if len(vessel.full_name)>5:
+            if len(vessel.full_name)>2:
                 note=note.replace(vessel.full_name,template.format(vessel.full_name))
         for vessel in self.visible:
             if vessel.id in tagged:
@@ -216,7 +216,7 @@ class Vessel(Base):
             template="[{}]"
             if vessel.program:
                 template="^"+template
-            if len(vessel.full_name)>5:
+            if len(vessel.full_name)>2:
                 note=note.replace(vessel.full_name,template.format(vessel.full_name))
         return note
     
@@ -382,6 +382,7 @@ class Vessel(Base):
         cols['full_name_with_id']=self.full_name_with_id
         cols['random']=self.random()
         cols['random_child']=self.random_child()
+        cols['forum']=self.forum
         return cols
     
     @property
@@ -395,10 +396,10 @@ class Vessel(Base):
     @property
     def rating(self):
         values=[
-            self.note,
-            self.attr,
-            self.program,
-            self.children,
+            self.note.strip()!="",
+            self.attr.strip()!="",
+            self.program.strip()!="",
+            self.children.all(),
             self.paradox,
             self.locked,
             self.hidden,
@@ -430,7 +431,7 @@ class Vessel(Base):
         ret=[]
         for vessel in cls.find(cls.id==cls.parent_id).all():
             if any([
-                vessel.locked,
+                not vessel.locked,
                 vessel.hidden,
                 vessel.rating<50,
                 vessel.id<1,
@@ -473,11 +474,13 @@ class Vessel(Base):
         L=[]
         while 1:
             L.append(V.id)
+            if V.parent is None:
+                break
             V=V.parent
             if V.parent_id==V.id:
                 return V
             if V.id in L:
-                return None
+                return V
         return V
     
     def __setattr__(self,name,value):
@@ -497,14 +500,16 @@ class Vessel(Base):
         L=[]
         d=0
         while 1:
+            if V is None:
+                break
+            if V.id in L:
+                break
             L.append(V.id)
             if V.parent_id==V.id:
-                return d
+                break
             V=V.parent
             d+=1
-            if V.id in L:
-                return float("inf")
-        return V
+        return d
     
     @classmethod
     def exists(cls,*args,**kwargs):

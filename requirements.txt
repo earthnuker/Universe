@@ -3,3 +3,4 @@ python-dateutil==2.6.1
 sqlalchemy==1.1.13
 tqdm==4.15.0
 pyreadline==2.1
+lupa==1.5
