@@ -69,7 +69,7 @@ def eval_template(parser,cmd,vessel,target=None,recursive=False):
         cmd=bytes(cmd[4:],"utf-8")
         cmd=base64.b32decode(cmd)
         cmd=str(cmd,"utf-8")
-        res,ns,err=lua_eval(cmd,parser)
+        err,res=lua_eval(cmd,parser)
         return None
     while 1:
         vessel=vessel or Ghost()
@@ -127,6 +127,8 @@ class Cmd_Parser(cmd.Cmd):
         self.in_program = False
         self.vessel=None
         self.forum_size=5
+        self.recursion_limit=20
+        self.stack=[]
         if test_mode:
             self.visible_count=None
         else:
@@ -315,6 +317,9 @@ class Cmd_Parser(cmd.Cmd):
             stop=self.onecmd(line)
             stop=self.postcmd(stop,line)
         self.in_program=False
+    def do_rl(self,cmd):
+        "Edit readline configuration"
+        return readline.parse_and_bind(cmd)
     def do_look(self,name):
         "Lists all visible Vessels."
         if name:
@@ -670,7 +675,12 @@ class Cmd_Parser(cmd.Cmd):
             if not target.program:
                 print("Target does not have a program")
                 return
+            self.stack.append(target.id)
+            if len(self.stack)>self.recursion_limit:
+                self.stack.clear()
+                raise RecursionError("Maximum recusion depth reached")
             command = eval_template(self,target.program,self.vessel)
+            self.stack.pop(-1)
             if not command:
                 return
             self.in_program=True
@@ -687,6 +697,14 @@ class Cmd_Parser(cmd.Cmd):
         self.vessel.attr=attr
         self.vessel.name=name
     
+    def do_lua_reset(self,args):
+        global lua,lua_globals
+        if args:
+            print("lua_reset takes no arguments")
+            return
+        lua,lua_globals=init_lua()
+        print("Lua Environment reset!")
+    
     def do_lua(self,args):
         """Execute Lua code"""
         code=[]
@@ -698,8 +716,8 @@ class Cmd_Parser(cmd.Cmd):
                 if not line:
                     break
                 code+=[line]
-        code="\n".join(lua_code)
-        err,ns,res=lua_eval(code,self)
+        code="\n".join(code)
+        err,res=lua_eval(code,self)
         if err:
             print(res)
         else:
@@ -926,15 +944,16 @@ def lua_eval(code,parser):
     global lua,lua_globals
     if not has_lua:
         raise NotImplementedError("lupa module not loaded")
-    g=lua_globals
-    g_old=list(g.items())
     allowed=['math','table','type','ipairs','error','tostring','unpack','print']
-    for k in g:
+    for k in lua_globals:
         if k in allowed:
             continue
-        del g[k]
+        del lua_globals[k]
+    g=lua_globals
     def to_id_map(data):
         return {v.id:v for v in data}
+    def timeout(message):
+        raise TimeoutError(message)
     g_upd={
         'int':int,
         'int_s':lambda v:str(int(v)),
@@ -957,43 +976,45 @@ def lua_eval(code,parser):
     }
     for k,v in g_upd.items():
         g[k]=v
-    g_old+=list(g.items())
     err=False
     try:
         res=lua.execute(code)
     except Exception as e:
         res=e
         err=True
-    for k,v in g_old:
-        if g[k]==v:
-            del g[k]
-    return err,dict(g),res
+    return err,res
+def init_lua():
+    def lua_getter(obj,attr):
+        if attr.startswith("_"):
+            raise AttributeError("not allowed to read attribute {}".format(attr))
+        return getattr(obj,attr)
+    def lua_setter(obj, attr, value):
+        if isinstance(obj,Vessel):
+            if attr in obj.cols:
+                return obj.__setattr__(attr,value)
+        if isinstance(obj,CmdParser):
+            if attr.startswith("do_"):
+                return obj.__setattr__(attr,value)
+        raise AttributeError("not allowed to write attribute {}".format(attr))
+    lupa_config={
+        "attribute_handlers":(lua_getter, lua_setter),
+        "register_eval":False,
+        "register_builtins":False,
+        "unpack_returned_tuples":True,
+    }
+    lua=lupa.LuaRuntime(**lupa_config)
+    debug=lua.require("debug")
+    debug.sethook(lua.compile("timeout('Lua code execution timed out')"),"",LUA_LIMIT)
+    lua_globals=lua.globals()
+    allowed=['math','table','type','ipairs','error','tostring','unpack','print']
+    for k in lua_globals:
+        if k in allowed:
+            continue
+        del lua_globals[k]
+    return lua,lua_globals
 if __name__=="__main__":
     if has_lua:
-        def lua_getter(obj,attr):
-            if attr.startswith("_"):
-                raise AttributeError("not allowed to read attribute {}".format(attr))
-            return getattr(obj,attr)
-        def lua_setter(obj, attr, value):
-            if isinstance(obj,Vessel):
-                if attr in obj.cols:
-                    return obj.__setattr__(attr,value)
-            if isinstance(obj,CmdParser):
-                if attr.startswith("do_"):
-                    return obj.__setattr__(attr,value)
-            raise AttributeError("not allowed to write attribute {}".format(attr))
-        lupa_config={
-            "attribute_handlers":(lua_getter, lua_setter)
-            "register_eval":False,
-            "register_builtins":False,
-            "unpack_returned_tuples":True,
-        }
-        lua=lupa.LuaRuntime(**lupa_config)
-        def timeout(message):
-            raise TimeoutError(message)
-        debug=lua.require("debug")
-        debug.sethook(lua.compile("timeout('Lua code execution timed out')"),"",LUA_LIMIT)
-        lua_globals=lua.globals()
+        lua,lua_globals=init_lua()
     if args.test or args.do_import:
         import import_snapshot
     if args.empty:
