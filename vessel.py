@@ -142,7 +142,7 @@ class Vessel(Base):
     program = Column(String,default="")
     
     parent_id = Column(Integer,ForeignKey('vessels.id'),default=None)
-    _children = relationship("Vessel",primaryjoin =('Vessel.id == Vessel.parent_id'),backref=backref('parent', remote_side=[id]),post_update=True)
+    _children_ = relationship("Vessel",primaryjoin =('Vessel.id == Vessel.parent_id'),backref=backref('parent', remote_side=[id]),post_update=True)
     owner_id = Column(Integer,ForeignKey('vessels.id'),default=None)
     owned = relationship("Vessel",primaryjoin =('Vessel.id == Vessel.owner_id'),backref=backref('owner', remote_side=[id]),post_update=True)
     created_raw = Column("created",DateTime,nullable=True,default=datetime.now)
@@ -377,7 +377,7 @@ class Vessel(Base):
         cols['parent']=self.parent
         cols['owner']=self.owner
         cols['children']=self.children.all()
-        cols['num_children']=len(cols['children'])
+        cols['num_children_']=len(cols['children'])
         cols['siblings']=self.siblings.all()
         cols['num_siblings']=len(cols['siblings'])
         cols['visible']=self.visible
