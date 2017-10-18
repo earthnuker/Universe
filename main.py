@@ -11,13 +11,26 @@ import readline
 import argparse
 import traceback
 from functools import wraps
-from datetime import datetime
+from datetime import datetime,timedelta
 import code
+import importlib
 try:
     import lupa # scripting
     import lupa._lupa # scripting
     has_lua=True
     LUA_LIMIT=1e8
+    lua_whitelist=['assert','string','math',
+                   'table','type','ipairs',
+                   'error','tostring','unpack',
+                   'print','setmetatable','getmetatable',
+                   'select','tonumber','xpcall',
+                   'module','pairs','pcall',
+                   'next ',
+                   ]
+    lua_blacklist=['string.dump']
+    python_whitelist=['builtins','math','re','string','cmath','functools','time']
+    python_blacklist=['time.sleep','builtins.quit','builtins.exit',
+                      'builtins.globals','builtins.locals','builtins.eval','builtins.exec']
 except ImportError:
     lua=None
     has_lua=False
@@ -69,7 +82,7 @@ def eval_template(parser,cmd,vessel,target=None,recursive=False):
         cmd=bytes(cmd[4:],"utf-8")
         cmd=base64.b32decode(cmd)
         cmd=str(cmd,"utf-8")
-        err,res=lua_eval(cmd,parser)
+        err,res=lua_eval(cmd,parser,target=target)
         return None
     while 1:
         vessel=vessel or Ghost()
@@ -189,14 +202,14 @@ class Cmd_Parser(cmd.Cmd):
     def prompt(self):
         prompt=""
         if self.vessel:
-            prompt="[{}@{}]".format(self.vessel.id,self.vessel.parent_id)
+            prompt="{}@{}".format(self.vessel.id,self.vessel.parent_id)
             if self.vessel.paradox:
-                prompt="[{}]".format(self.vessel.id,self.vessel.parent_id)
+                prompt="{}".format(self.vessel.id,self.vessel.parent_id)
         elif self.location:
-            prompt="[(None)@{}]".format(self.location.id)
+            prompt="(None)@{}".format(self.location.id)
         if self.in_program:
-            prompt="[(program){}]".format(prompt)
-        return "{}> ".format(prompt)
+            prompt="(program)|{}".format(prompt)
+        return "[{}]> ".format(prompt)
     
     def cmdloop(self):
         self.cmdqueue.append("")
@@ -711,27 +724,34 @@ class Cmd_Parser(cmd.Cmd):
         if args:
             code=[args]
         else:
-            while 1:
-                line=input("lua:>")
-                if not line:
-                    break
-                code+=[line]
-        code="\n".join(code)
-        err,res=lua_eval(code,self)
+            code=list(self.read_multiline("lua:>"))
+        code_s="\n".join(code)
+        err,res=lua_eval(code_s,self)
         if err:
             print(res)
         else:
+            if lupa.lua_type(res)=="table":
+                res=dict(res)
             print("Result:",res)
+    
+    def read_multiline(self,prompt):
+        print(prompt,end="",flush=True)
+        for line in sys.stdin:
+            line=line.strip()
+            if line==":END":
+                break
+            yield line
+            print(prompt,end="",flush=True)
     
     @needs_vessel
     def do_cast(self,name):
         "Remotely execute a program, optionally in the context of another vessel (using 'cast ... onto ...')"
-        if " on " in name:
-            spell,target_name=map(clean_vessel_name,name.split(" on "))
-            target=self.vessel.find_visible(target_name)
-        elif " onto " in name:
-            spell,target_name=map(clean_vessel_name,name.split(" onto "))
-            target=self.vessel.find_visible(target_name)
+        for sep_ in ["on","onto"]:
+            sep=" {} ".format(sep_)
+            if sep in name:
+                spell,target_name=map(clean_vessel_name,name.split(sep))
+                target=self.vessel.find_visible(target_name)
+                break
         else:
             spell=clean_vessel_name(name)
             target_name=self.vessel.full_name
@@ -940,26 +960,42 @@ class VesselEncoder(json.JSONEncoder):
 def serialize(data):
     return json.dumps(data,cls=VesselEncoder,sort_keys=True,indent=4)
 
-def lua_eval(code,parser):
-    global lua,lua_globals
+def lua_eval(code,parser,*,reset=True,**kwargs):
+    global lua,lua_globals,lua_whitelist
     if not has_lua:
         raise NotImplementedError("lupa module not loaded")
-    allowed=['math','table','type','ipairs','error','tostring','unpack','print']
-    for k in lua_globals:
-        if k in allowed:
-            continue
-        del lua_globals[k]
+    if reset:
+        for k in lua_globals:
+            if k in lua_whitelist:
+                continue
+            del lua_globals[k]
+    for v in lua_blacklist:
+        lua.execute("{}=nil".format(v))
     g=lua_globals
     def to_id_map(data):
         return {v.id:v for v in data}
     def timeout(message):
         raise TimeoutError(message)
+    def import_filter(module,function=None):
+        if not module in python_whitelist:
+            raise AttributeError("Access denied: {}".format(module))
+        imp_path=".".join([module,function or ""]).strip(".")
+        if imp_path in python_blacklist:
+            raise AttributeError("Access denied: {}".format(imp_path))
+        #if ".".join([module]+(function or "")).strip("."):
+        if function and not function.startswith("_"):
+            return getattr(importlib.import_module(module),function)
+        elif function:
+            raise AttributeError("Access denied: {}".format(function))
+        return importlib.import_module(module)
     g_upd={
+        #'python':import_filter("builtins"),
+        'py_import':import_filter,
         'int':int,
         'int_s':lambda v:str(int(v)),
         'format':lambda s,*f:s.format(*f),
         'timeout':timeout,
-        'template':lambda s:eval_template(parser,s,parser.vessel),
+        'template':lambda s,kwargs={}:eval_template(parser,s,parser.vessel,**kwargs),
         'parser':parser,
         'parser_cls':type(parser),
         'cmd':lambda *cmds:parser.script(*cmds,silent=False),
@@ -974,6 +1010,7 @@ def lua_eval(code,parser):
         'nataniev':lambda tz:Clock(tz).as_dict(),
         'find':lambda id_n:Vessel.find_distant(id_n),
     }
+    g_upd.update(kwargs)
     for k,v in g_upd.items():
         g[k]=v
     err=False
@@ -985,9 +1022,16 @@ def lua_eval(code,parser):
     return err,res
 def init_lua():
     def lua_getter(obj,attr):
-        if attr.startswith("_"):
-            raise AttributeError("not allowed to read attribute {}".format(attr))
-        return getattr(obj,attr)
+        print("GET",obj,attr)
+        if isinstance(attr,str):
+            if attr.startswith("_") and attr.endswith("_"):
+                raise AttributeError("not allowed to read attribute {}".format(attr))
+            if getattr(obj,"__name__",None)!=None:
+                if "{}.{}".format(obj.__name__,attr) in python_blacklist:
+                    if getattr(obj,attr)!=None:
+                        raise AttributeError("not allowed to read attribute {}.{}".format(obj.__name__,attr))
+            return getattr(obj,attr)
+        return obj[attr]
     def lua_setter(obj, attr, value):
         if isinstance(obj,Vessel):
             if attr in obj.cols:
@@ -1006,11 +1050,12 @@ def init_lua():
     debug=lua.require("debug")
     debug.sethook(lua.compile("timeout('Lua code execution timed out')"),"",LUA_LIMIT)
     lua_globals=lua.globals()
-    allowed=['math','table','type','ipairs','error','tostring','unpack','print']
     for k in lua_globals:
-        if k in allowed:
+        if k in lua_whitelist:
             continue
         del lua_globals[k]
+    for v in lua_blacklist:
+        lua.execute("{}=nil".format(v))
     return lua,lua_globals
 if __name__=="__main__":
     if has_lua:
@@ -1045,6 +1090,9 @@ if __name__=="__main__":
         pprint.pprint((parser.vessel or parser.location).dict)
         #print(serialize(parser.vessel or parser.location),file=stream)
     #exit()
+    while 1:
+        parser.do_lua("")
+    exit()
     if args.commands:
         parser.script(*args.commands)
     if args.test:
