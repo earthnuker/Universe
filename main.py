@@ -797,8 +797,8 @@ class Cmd_Parser(cmd.Cmd):
     
     def read_multiline(self,prompt):
         print(prompt,end="",flush=True)
-        for line in sys.stdin:
-            line=line.strip()
+        while 1:
+            line=input().strip()
             if line==".end":
                 break
             yield line
@@ -1078,7 +1078,7 @@ def lua_eval(code,parser,*,reset=True,**kwargs):
         lua.execute("{}={}".format(k,v))
     g=lua_globals
     def to_id_map(data):
-        return {v.id:v for v in data}
+        return lua.table_from({v.id:v for v in data})
     def timeout(message):
         raise TimeoutError(message)
     def import_filter(module,function=None):
@@ -1109,8 +1109,8 @@ def lua_eval(code,parser,*,reset=True,**kwargs):
         'atlas':to_id_map(Vessel.atlas),
         'spells':to_id_map(Vessel.spells),
         'tunnels':to_id_map(Vessel.tunnels),
-        'time':Clock().as_dict(),
-        'nataniev':lambda tz:Clock(tz).as_dict(),
+        'time':lua.table(Clock().as_dict()),
+        'nataniev':lambda tz:lua.table(Clock(tz).as_dict()),
         'find_vessel':lambda id_n:Vessel.find_distant(id_n),
     }
     g_upd.update(kwargs)
