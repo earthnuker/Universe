@@ -7,6 +7,7 @@ import types
 import base64
 import codecs
 import random
+import getpass
 import textwrap
 import readline
 import argparse
@@ -51,7 +52,7 @@ import jinja2.meta
 import jinja2.sandbox
 
 from date_time import Clock
-from vessel import Vessel,Ghost,Forum,InvalidVesselException
+from vessel import Vessel,Ghost,Forum,User,InvalidVesselException
 from vessel import split_vessel_name,clean_vessel_name,engine
 
 #if not os.path.isfile("universe.db"):
@@ -167,6 +168,7 @@ class Cmd_Parser(cmd.Cmd):
         self.user_cmds=set()
         self.in_program = False
         self.vessel=None
+        self.user=None
         self.forum_size=5
         self.recursion_limit=50
         self.stack=[]
@@ -180,16 +182,15 @@ class Cmd_Parser(cmd.Cmd):
             else:
                 self.location=Vessel.get(location)
         else:
-            VL=Vessel.find().all()
+            VL=Vessel.find((Vessel.locked==False) & (Vessel.hidden==False) & (Vessel.id!=0))
+            VL=VL.all()
             random.shuffle(VL)
             for self.location in VL:
                 if any([
-                    self.location.locked,
-                    self.location.hidden,
-                    self.location.rating<50,
-                    self.location.id<1,
                     self.location.parent is None,
                     ]):
+                    continue
+                if self.location.rating<50:
                     continue
                 break
             else:
@@ -232,7 +233,9 @@ class Cmd_Parser(cmd.Cmd):
         if self.vessel:
             prompt="{}@{}".format(self.vessel.id,self.vessel.parent_id)
             if self.vessel.paradox:
-                prompt="{}".format(self.vessel.id,self.vessel.parent_id)
+                prompt="{}".format(self.vessel.id)
+            if self.user:
+                prompt="{}:{}".format(self.user.username,prompt)
         elif self.location:
             prompt="(None)@{}".format(self.location.id)
         if self.in_program:
@@ -264,9 +267,9 @@ class Cmd_Parser(cmd.Cmd):
         return ''
     
     def postcmd(self,stop,line):
-        Vessel.update()
         if not line:
             return
+        Vessel.update()
         if line.split()[0] in ["look","inspect","shell","help","print"]:
             print()
             return
@@ -542,6 +545,8 @@ class Cmd_Parser(cmd.Cmd):
                 print("There is no",name,"here")
                 return
         self.vessel=target
+        self.user.vessel_id=self.vessel.id
+        Vessel.commit()
         print("You are now the {}".format(self.vessel.full_name_with_id))
     
     @needs_vessel
@@ -939,7 +944,32 @@ class Cmd_Parser(cmd.Cmd):
                 user_cmds_undoc.append(cmd_name)
         self.print_topics("Documented user defined commands",user_cmds_doc, 15,80)
         self.print_topics("Undocumented user defined commands",user_cmds_undoc, 15,80)
-
+    
+    def do_register(self,args):
+        username=args
+        password=getpass.getpass()
+        password_v=getpass.getpass("Verify Passowrd:")
+        if password!=password_v:
+            print("Passwords do not match")
+            return
+        self.user=User.register(username,password)
+        if self.vessel:
+            self.user.vessel_id=self.vessel.id
+            Vessel.commit()
+    
+    def do_login(self,args):
+        username=args
+        password=getpass.getpass()
+        user=User.get(username)
+        if not user:
+            print("User does not exist")
+            return
+        if not user.verify(password):
+            print("Invalid Passowrd")
+        self.user=user
+        self.vessel=self.user.vessel
+    
+    
     def help_wildcards(self):
         print(textwrap.dedent("""
         Wildcards are dynamic text to be used in notes and programs to create responsive narratives.
@@ -1024,6 +1054,7 @@ class Cmd_Parser(cmd.Cmd):
         setattr(type(self),cmd_name,func)
         setattr(self,cmd_name,types.MethodType(func,self))
 
+sys.argv=list(sys.argv)
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("-t","--test",action="store_true",help="Run test suite")
 arg_parser.add_argument("-i","--do_import",action="store_true",help="Reset Database and import Snapshot")
@@ -1064,7 +1095,7 @@ def serialize(data):
     return json.dumps(data,cls=VesselEncoder,sort_keys=True,indent=4)
 
 def lua_eval(code,parser,*,reset=True,**kwargs):
-    global lua,lua_globals,lua_whitelist
+    #global lua,lua_globals,lua_whitelist
     if not has_lua:
         raise NotImplementedError("lupa module not loaded")
     if reset:
@@ -1164,9 +1195,11 @@ if __name__=="__main__":
     if args.empty:
         Forum.metadata.drop_all(engine)
         Vessel.metadata.drop_all(engine)
+        User.metadata.drop_all(engine)
         
         Forum.metadata.create_all(engine)
         Vessel.metadata.create_all(engine)
+        User.metadata.create_all(engine)
         Vessel( # create root vessel
             id=0,
             attr="central",
