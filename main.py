@@ -39,9 +39,18 @@ try:
         end
         return o
     end
+    """,
+    "table.size":"""
+    function(t)
+        local count=0
+        for k,v in pairs(t) do
+            count = count + 1
+        end
+        return count
+    end
     """}
     lua_blacklist=list(lua_overrides.keys())
-    python_whitelist=['builtins','math','re','string','cmath','functools','time']
+    python_whitelist=['builtins','math','re','string','cmath','functools','time','datetime']
     python_blacklist=['time.sleep','builtins.quit','builtins.exit',
                       'builtins.globals','builtins.locals','builtins.eval','builtins.exec']
 except ImportError:
@@ -118,9 +127,8 @@ def eval_template(parser,cmd,vessel,target=None,recursive=False):
             'time':Clock().as_dict(),
             'nataniev':lambda tz:Clock(tz).as_dict(),
             'find':lambda id_n:Vessel.find_distant(id_n),
+            'target':target,
         }
-        if target:
-            args['target']=target
         try:
             template=jinja.parse(cmd)
         except:
@@ -152,9 +160,7 @@ def modifies_vessel(func):
     func=needs_vessel(func)
     @wraps(func)
     def wrapped(self,*args,**kwargs):
-        if self.vessel.parent.owner_id==self.vessel.id:
-            self.vessel.parent.program=program
-        else:
+        if not self.vessel.parent.owner_id==self.vessel.id:
             print("You do not own the",self.vessel.parent.full_name)
             return
         return func(self,*args,**kwargs)
@@ -545,8 +551,9 @@ class Cmd_Parser(cmd.Cmd):
                 print("There is no",name,"here")
                 return
         self.vessel=target
-        self.user.vessel_id=self.vessel.id
-        Vessel.commit()
+        if self.user:
+            self.user.vessel_id=self.vessel.id
+        Vessel.update()
         print("You are now the {}".format(self.vessel.full_name_with_id))
     
     @needs_vessel
@@ -585,17 +592,17 @@ class Cmd_Parser(cmd.Cmd):
         if args:
             code=[args]
         else:
-            while 1:
-                line=input("lua:>")
-                if not line:
-                    break
-                code+=[line]
+            code=list(self.read_multiline("lua:>"))
         code="\n".join(code)
         self.vessel.parent.program=str(b"lua:"+base64.b64encode(bytes(code,"utf-8")),"utf-8")
     
     @modifies_vessel
     def do_note(self,note):
         "Add a description to the current parent vessel."
+        if not note:
+            print("use '.end' to end multiline input")
+            note=list(self.read_multiline("note:>"))
+            note="\n".join(doc)
         self.vessel.parent.raw_note=note
     
     @needs_vessel
@@ -833,6 +840,8 @@ class Cmd_Parser(cmd.Cmd):
         except StopIteration:
             print("The {} does not exist".format(spell))
             return
+        if not spell_command:
+            return
         if not target:
             print("Target {} does not exist".format(target_name))
             return
@@ -946,6 +955,7 @@ class Cmd_Parser(cmd.Cmd):
         self.print_topics("Undocumented user defined commands",user_cmds_undoc, 15,80)
     
     def do_register(self,args):
+        "Register a user account"
         username=args
         print("Warning: Password input may be echoed.")
         
@@ -963,9 +973,10 @@ class Cmd_Parser(cmd.Cmd):
         self.user=User.register(username,password)
         if self.vessel:
             self.user.vessel_id=self.vessel.id
-            Vessel.commit()
+            Vessel.update()
     
     def do_logout(self,args):
+        "Log out"
         if args:
             print("logout takes no arguments")
             return
@@ -974,6 +985,7 @@ class Cmd_Parser(cmd.Cmd):
             self.vessel=None
     
     def do_login(self,args):
+        "Log in"
         username=args
         if self.conninfo:
             print("Warning: Password input may be echoed.")
@@ -1153,6 +1165,7 @@ def lua_eval(code,parser,*,reset=True,**kwargs):
         'timeout':timeout,
         'template':lambda s,kwargs={}:eval_template(parser,s,parser.vessel,**kwargs),
         'cmd':lambda *cmds:parser.script(*cmds,silent=False),
+        'cmd_s':lambda *cmds:parser.script(*cmds,silent=True),
         'py_print':print,
         'vessel':parser.vessel or Ghost(),
         'location':((lambda:parser.vessel.parent) if parser.vessel else (lambda:parser.location))(),
@@ -1167,6 +1180,7 @@ def lua_eval(code,parser,*,reset=True,**kwargs):
     g_upd.update(kwargs)
     for k,v in g_upd.items():
         g[k]=v
+    g['_G']=g
     try:
         return False,lua.execute(code)
     except Exception as e:
@@ -1296,3 +1310,4 @@ if __name__=="__main__":
                 break
             except Exception as e:
                 print("Error:",*e.args)
+                #raise
