@@ -3,21 +3,47 @@ import os
 import io
 import sys
 import cmd
+import types
 import base64
 import codecs
 import random
+import getpass
 import textwrap
 import readline
 import argparse
 import traceback
-from functools import wraps
-from datetime import datetime
+from functools import wraps,partial
+from datetime import datetime,timedelta
 import code
+import importlib
 try:
     import lupa # scripting
     import lupa._lupa # scripting
     has_lua=True
     LUA_LIMIT=1e8
+    lua_whitelist=['assert','string','math',
+                   'table','type','ipairs',
+                   'error','tostring','unpack',
+                   'print','setmetatable','getmetatable',
+                   'select','tonumber','xpcall',
+                   'module','pairs','pcall',
+                   'next','inspect']
+    lua_overrides={"string.rep":"""
+    function(s,n)
+        o=''
+        for i=0,n do
+            o=o..s
+            if #o > 8192 then
+                error('Maximum string length reached')
+            end
+        end
+        return o
+    end
+    """}
+    lua_blacklist=list(lua_overrides.keys())
+    python_whitelist=['builtins','math','re','string','cmath','functools','time']
+    python_blacklist=['time.sleep','builtins.quit','builtins.exit',
+                      'builtins.globals','builtins.locals','builtins.eval','builtins.exec']
 except ImportError:
     lua=None
     has_lua=False
@@ -26,7 +52,7 @@ import jinja2.meta
 import jinja2.sandbox
 
 from date_time import Clock
-from vessel import Vessel,Ghost,Forum,InvalidVesselException
+from vessel import Vessel,Ghost,Forum,User,InvalidVesselException
 from vessel import split_vessel_name,clean_vessel_name,engine
 
 #if not os.path.isfile("universe.db"):
@@ -67,9 +93,11 @@ jinja.filters['lformat']=lformat
 def eval_template(parser,cmd,vessel,target=None,recursive=False):
     if cmd.startswith("lua:"):
         cmd=bytes(cmd[4:],"utf-8")
-        cmd=base64.b32decode(cmd)
+        cmd=base64.b64decode(cmd)
         cmd=str(cmd,"utf-8")
-        err,res=lua_eval(cmd,parser)
+        err,res=lua_eval(cmd,parser,target=target)
+        if err:
+            print("Error:",res)
         return None
     while 1:
         vessel=vessel or Ghost()
@@ -120,14 +148,29 @@ def needs_vessel(func):
     wrapped.needs_vessel=True
     return wrapped
 
+def modifies_vessel(func):
+    func=needs_vessel(func)
+    @wraps(func)
+    def wrapped(self,*args,**kwargs):
+        if self.vessel.parent.owner_id==self.vessel.id:
+            self.vessel.parent.program=program
+        else:
+            print("You do not own the",self.vessel.parent.full_name)
+            return
+        return func(self,*args,**kwargs)
+    wrapped.modifies_vessel=True
+    return wrapped
+
 class Cmd_Parser(cmd.Cmd):
     prompt="> "
     use_rawinput=True
     def __init__(self,location=None,*,test_mode=False):
+        self.user_cmds=set()
         self.in_program = False
         self.vessel=None
+        self.user=None
         self.forum_size=5
-        self.recursion_limit=20
+        self.recursion_limit=50
         self.stack=[]
         if test_mode:
             self.visible_count=None
@@ -139,16 +182,15 @@ class Cmd_Parser(cmd.Cmd):
             else:
                 self.location=Vessel.get(location)
         else:
-            VL=Vessel.find().all()
+            VL=Vessel.find((Vessel.locked==False) & (Vessel.hidden==False) & (Vessel.id!=0))
+            VL=VL.all()
             random.shuffle(VL)
             for self.location in VL:
                 if any([
-                    self.location.locked,
-                    self.location.hidden,
-                    self.location.rating<50,
-                    self.location.id<1,
                     self.location.parent is None,
                     ]):
+                    continue
+                if self.location.rating<50:
                     continue
                 break
             else:
@@ -189,14 +231,16 @@ class Cmd_Parser(cmd.Cmd):
     def prompt(self):
         prompt=""
         if self.vessel:
-            prompt="[{}@{}]".format(self.vessel.id,self.vessel.parent_id)
+            prompt="{}@{}".format(self.vessel.id,self.vessel.parent_id)
             if self.vessel.paradox:
-                prompt="[{}]".format(self.vessel.id,self.vessel.parent_id)
+                prompt="{}".format(self.vessel.id)
+            if self.user:
+                prompt="{}:{}".format(self.user.username,prompt)
         elif self.location:
-            prompt="[(None)@{}]".format(self.location.id)
+            prompt="(None)@{}".format(self.location.id)
         if self.in_program:
-            prompt="[(program){}]".format(prompt)
-        return "{}> ".format(prompt)
+            prompt="(program|{})|{}".format(len(self.stack),prompt)
+        return "[{}]> ".format(prompt)
     
     def cmdloop(self):
         self.cmdqueue.append("")
@@ -223,9 +267,9 @@ class Cmd_Parser(cmd.Cmd):
         return ''
     
     def postcmd(self,stop,line):
-        Vessel.update()
         if not line:
             return
+        Vessel.update()
         if line.split()[0] in ["look","inspect","shell","help","print"]:
             print()
             return
@@ -303,12 +347,15 @@ class Cmd_Parser(cmd.Cmd):
         return
     
     def default(self,cmd):
-        if not cmd:
-            return ''
-        assert not self.test_mode
-        super(type(self),self).default(cmd)
+        #TODO: check onbjects for do_{cmd} method, execute command
+        return super(type(self),self).default(cmd)
     
     def script(self,*args,silent=False):
+        self.stack.append(self.location)
+        if len(self.stack)>self.recursion_limit:
+            self.stack.clear()
+            self.in_program=False
+            raise Exception("Maximum recusion depth reached")
         self.in_program=True
         for line in args:
             if not silent:
@@ -317,9 +364,12 @@ class Cmd_Parser(cmd.Cmd):
             stop=self.onecmd(line)
             stop=self.postcmd(stop,line)
         self.in_program=False
+        self.stack.pop(-1)
+    
     def do_rl(self,cmd):
-        "Edit readline configuration"
+        "Change readline configuration"
         return readline.parse_and_bind(cmd)
+    
     def do_look(self,name):
         "Lists all visible Vessels."
         if name:
@@ -495,6 +545,8 @@ class Cmd_Parser(cmd.Cmd):
                 print("There is no",name,"here")
                 return
         self.vessel=target
+        self.user.vessel_id=self.vessel.id
+        Vessel.commit()
         print("You are now the {}".format(self.vessel.full_name_with_id))
     
     @needs_vessel
@@ -521,40 +573,30 @@ class Cmd_Parser(cmd.Cmd):
         print("Leaving the",self.vessel.parent.full_name_with_id,"and entering the ",self.vessel.parent.parent.full_name_with_id)
         self.vessel.parent_id=self.vessel.parent.parent_id
     
-    @needs_vessel
+    @modifies_vessel
     def do_program(self,program):
         "Add an automation program to a vessel, making it available to the use command. ('help with programming' for more info)"
-        if self.vessel.parent.owner_id==self.vessel.id:
-            self.vessel.parent.program=program
-        else:
-            print("You do not own the",self.vessel.parent.full_name)
-    
-    @needs_vessel
+        self.vessel.parent.program=program
+        
+    @modifies_vessel
     def do_program_lua(self,args):
         "Add an automation program to a vessel, making it available to the use command. ('help with programming' for more info)"
-        if self.vessel.parent.owner_id==self.vessel.id:
-            code=[]
-            if args:
-                code=[args]
-            else:
-                while 1:
-                    line=input("lua:>")
-                    if not line:
-                        break
-                    code+=[line]
-            code="\n".join(code)
-            self.vessel.parent.program=str(b"lua:"+base64.b32encode(bytes(code,"utf-8")),"utf-8")
+        code=[]
+        if args:
+            code=[args]
         else:
-            print("You do not own the",self.vessel.parent.full_name)
+            while 1:
+                line=input("lua:>")
+                if not line:
+                    break
+                code+=[line]
+        code="\n".join(code)
+        self.vessel.parent.program=str(b"lua:"+base64.b64encode(bytes(code,"utf-8")),"utf-8")
     
-    @needs_vessel
+    @modifies_vessel
     def do_note(self,note):
         "Add a description to the current parent vessel."
-        if self.vessel.parent.owner_id==self.vessel.id:
-            self.vessel.parent.raw_note=note
-        else:
-            print("You do not own the",self.vessel.parent.full_name)
-    
+        self.vessel.parent.raw_note=note
     
     @needs_vessel
     def do_fold(self,name):
@@ -610,7 +652,7 @@ class Cmd_Parser(cmd.Cmd):
             return
         print("{} not found".format(name))
     
-    @needs_vessel
+    @modifies_vessel
     def do_set(self,name):
         """
         Directly write attributes for a owned vessel, the set command is meant to be used with programs and casted as spells.
@@ -623,23 +665,17 @@ class Cmd_Parser(cmd.Cmd):
         attr,value=name.split()
         if attr in ["is_{}".format(flag) for flag in ("locked","hidden","silent","tunnel")]:
             attr=attr[3:]
-            if value.lower()=="true":
+            if value.lower() in ["true","yes","1"]:
                 value=True
-            elif value.lower()=="false":
+            elif value.lower() in ["false","no","0"]:
                 value=False
             else:
                 print("Invalid value: {}".format(value))
                 return
             if self.in_program:
-                if self.vessel.owner_id==self.vessel.id:
-                    setattr(self.vessel,attr,value)
-                else:
-                    print("You do not own the {}".format(self.vessel.full_name_with_id))
+                setattr(self.vessel,attr,value)
             else:
-                if self.vessel.parent.owner_id==self.vessel.id:
-                    setattr(self.vessel.parent,attr,value)
-                else:
-                    print("You do not own the {}".format(self.vessel.parent.full_name_with_id))
+                setattr(self.vessel.parent,attr,value)
             return
         print("Invalid attribute: {}".format(attr))
     
@@ -650,8 +686,11 @@ class Cmd_Parser(cmd.Cmd):
         name = clean_vessel_name(name)
         target=self.vessel.find_visible(name)
         if target:
-            target.parent_id=self.vessel.id
-            print("You took the",target.full_name)
+            if target.owner==self.vessel:
+                target.parent_id=self.vessel.id
+                print("You took the",target.full_name)
+            else:
+                print("You do not own",target.full_name)
         else:
             print("There is no",name,"here")
     
@@ -675,12 +714,7 @@ class Cmd_Parser(cmd.Cmd):
             if not target.program:
                 print("Target does not have a program")
                 return
-            self.stack.append(target.id)
-            if len(self.stack)>self.recursion_limit:
-                self.stack.clear()
-                raise RecursionError("Maximum recusion depth reached")
             command = eval_template(self,target.program,self.vessel)
-            self.stack.pop(-1)
             if not command:
                 return
             self.in_program=True
@@ -698,6 +732,7 @@ class Cmd_Parser(cmd.Cmd):
         self.vessel.name=name
     
     def do_lua_reset(self,args):
+        """Reset lua environment"""
         global lua,lua_globals
         if args:
             print("lua_reset takes no arguments")
@@ -707,31 +742,84 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_lua(self,args):
         """Execute Lua code"""
-        code=[]
-        if args:
-            code=[args]
-        else:
-            while 1:
-                line=input("lua:>")
-                if not line:
-                    break
-                code+=[line]
-        code="\n".join(code)
-        err,res=lua_eval(code,self)
+        if not args:
+            print("use '.exit' to exit lua-mode")
+            print("use '.end' to end multiline input and eval code")
+        while True:
+            code=[]
+            if args:
+                code=[args]
+            else:
+                code=list(self.read_multiline("lua:>"))
+            if not code:
+                continue
+            if code[-1]=='.exit':
+                break
+            code_s="\n".join(code)
+            err,res=lua_eval(code_s,self)
+            if err:
+                print("Error:",res)
+            else:
+                if lupa.lua_type(res)=="table":
+                    res=dict(res)
+                print("Result:",res)
+            if args: break
+    
+    def do_new_cmd(self,cmd):
+        "Defines a new parser command"
+        if not cmd:
+            print("You need to supply a command to define")
+            return
+        print("use '.end' to end multiline input")
+        code=list(self.read_multiline("cmd:{}:>".format(cmd)))
+        code_s="\n".join(code)
+        err,res=lua_eval(code_s,self)
         if err:
-            print(res)
-        else:
-            print("Result:",res)
+            print("Error:",res)
+            return
+        if not res:
+            res=dict(lua_globals).get('do_'+cmd,None)
+        if not lupa.lua_type(res)=='function':
+            print("Error: lua code should return or define a function 'do_"+cmd+"'")
+            return
+        self.register_command(cmd,res)
+        return
+    
+    def do_doc_cmd(self,cmd):
+        "Document a user defined command"
+        cmd_name="do_"+cmd
+        if not hasattr(self,cmd_name):
+            print("Can't document non-existing function!")
+            return
+        if not cmd_name in self.user_cmds:
+            print("Can't document non-user-defined function!")
+            return
+        print("use '.end' to end multiline input")
+        doc=list(self.read_multiline("doc:{}:>".format(cmd)))
+        doc="\n".join(doc)
+        self.document_command(cmd,doc)
+        return
+    
+    def read_multiline(self,prompt):
+        print(prompt,end="",flush=True)
+        while 1:
+            line=input().strip()
+            if line==".end":
+                break
+            yield line
+            if line==".exit":
+                break
+            print(prompt,end="",flush=True)
     
     @needs_vessel
     def do_cast(self,name):
         "Remotely execute a program, optionally in the context of another vessel (using 'cast ... onto ...')"
-        if " on " in name:
-            spell,target_name=map(clean_vessel_name,name.split(" on "))
-            target=self.vessel.find_visible(target_name)
-        elif " onto " in name:
-            spell,target_name=map(clean_vessel_name,name.split(" onto "))
-            target=self.vessel.find_visible(target_name)
+        for sep_ in ["on","onto"]:
+            sep=" {} ".format(sep_)
+            if sep in name:
+                spell,target_name=map(clean_vessel_name,name.split(sep))
+                target=self.vessel.find_visible(target_name)
+                break
         else:
             spell=clean_vessel_name(name)
             target_name=self.vessel.full_name
@@ -777,6 +865,7 @@ class Cmd_Parser(cmd.Cmd):
             target.owner_id=self.vessel.id
         target.locked=locked
     
+    @needs_vessel
     def do_say(self,message):
         "Add a message into the global dialog."
         if self.vessel.parent.silent:
@@ -788,6 +877,7 @@ class Cmd_Parser(cmd.Cmd):
             print(msg.str)
         return
     
+    @needs_vessel
     def do_signal(self,name):
         "Broadcast your current visible parent vessel."
         if self.vessel.parent.silent:
@@ -816,6 +906,7 @@ class Cmd_Parser(cmd.Cmd):
             msg=Forum(host_id=self.vessel.parent.id,from_id=self.vessel.id,message=str(self.vessel.parent.id))
         print(msg.str)
     
+    @needs_vessel
     def do_emote(self,message):
         "Add an emote message into the global dialog."
         if self.vessel.parent.silent:
@@ -827,12 +918,77 @@ class Cmd_Parser(cmd.Cmd):
             print(msg.str)
         return
     
+    def get_names(self):
+        user_cmds=[c[3:] for c in self.user_cmds]
+        ret=[]
+        for cmd in dir(self):
+            if cmd.startswith(("do_","help_")):
+                if cmd.split("_",1)[1] not in user_cmds:
+                    ret.append(cmd)
+        return ret
+    
     def do_help(self,name):
         "Prints help."
-        if name.startswith("with "):
-            name=name.replace("with ","")
-        
+        if name:
+            if name.startswith("with "):
+                name=name.replace("with ","")
+            return super().do_help(name)
         super().do_help(name)
+        user_cmds_doc=[]
+        user_cmds_undoc=[]
+        for cmd in sorted(self.user_cmds):
+            cmd_name=cmd[3:]
+            if hasattr(self,"help_"+cmd_name):
+                user_cmds_doc.append(cmd_name)
+            else:
+                user_cmds_undoc.append(cmd_name)
+        self.print_topics("Documented user defined commands",user_cmds_doc, 15,80)
+        self.print_topics("Undocumented user defined commands",user_cmds_undoc, 15,80)
+    
+    def do_register(self,args):
+        username=args
+        print("Warning: Password input may be echoed.")
+        
+        if self.conninfo:
+            print("Warning: Password input may be echoed.")
+            password=input("Password:")
+            password_v=input("Verify Password:")
+        else:
+            password=getpass.getpass(stream=sys.stdout)
+            password_v=getpass.getpass("Verify Password:",stream=sys.stdout)
+        
+        if password!=password_v:
+            print("Passwords do not match")
+            return
+        self.user=User.register(username,password)
+        if self.vessel:
+            self.user.vessel_id=self.vessel.id
+            Vessel.commit()
+    
+    def do_logout(self,args):
+        if args:
+            print("logout takes no arguments")
+            return
+        self.user=None
+        if self.vessel:
+            self.vessel=None
+    
+    def do_login(self,args):
+        username=args
+        if self.conninfo:
+            print("Warning: Password input may be echoed.")
+            password=input("Password:")
+        else:
+            password=getpass.getpass(stream=sys.stdout)
+        user=User.get(username)
+        if not user:
+            print("User does not exist")
+            return
+        if not user.verify(password):
+            print("Invalid Passowrd")
+        self.user=user
+        self.vessel=self.user.vessel
+    
     
     def help_wildcards(self):
         print(textwrap.dedent("""
@@ -901,7 +1057,24 @@ class Cmd_Parser(cmd.Cmd):
     def do_EOF(self,args):
         "End of file, exits"
         return True
+    
+    def register_command(self,cmd,func):
+        cmd_name="do_"+cmd
+        if hasattr(self,cmd_name) and not cmd_name in self.user_cmds:
+            print("Can't redefine non-user-defined function!")
+            return
+        self.user_cmds.add(cmd_name)
+        setattr(type(self),cmd_name,func)
+        setattr(self,cmd_name,types.MethodType(func,self))
+    
+    def document_command(self,cmd,doc):
+        def func(self):
+            print(doc)
+        cmd_name="help_"+cmd
+        setattr(type(self),cmd_name,func)
+        setattr(self,cmd_name,types.MethodType(func,self))
 
+sys.argv=list(sys.argv)
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("-t","--test",action="store_true",help="Run test suite")
 arg_parser.add_argument("-i","--do_import",action="store_true",help="Reset Database and import Snapshot")
@@ -910,6 +1083,7 @@ arg_parser.add_argument("-v","--vessel",action="store_true",help="location is a 
 arg_parser.add_argument("-j","--json",action="store_true",help="json output")
 arg_parser.add_argument("-e","--empty",action="store_true",help="start with an empty universe (except for ID 0)")
 arg_parser.add_argument("-l","--location",type=int,help="Start location (default=random) or vessel",default=None)
+arg_parser.add_argument("-db","--database",type=str,help="Database file to use",default="universe.db")
 arg_parser.add_argument("commands",type=str,help="Commands to run",default=None,nargs='*')
 args=arg_parser.parse_args()
 #args.json=False
@@ -940,60 +1114,78 @@ class VesselEncoder(json.JSONEncoder):
 def serialize(data):
     return json.dumps(data,cls=VesselEncoder,sort_keys=True,indent=4)
 
-def lua_eval(code,parser):
-    global lua,lua_globals
+def lua_eval(code,parser,*,reset=True,**kwargs):
+    #global lua,lua_globals,lua_whitelist
     if not has_lua:
         raise NotImplementedError("lupa module not loaded")
-    allowed=['math','table','type','ipairs','error','tostring','unpack','print']
-    for k in lua_globals:
-        if k in allowed:
-            continue
-        del lua_globals[k]
+    if reset:
+        for k in lua_globals:
+            if k in lua_whitelist:
+                continue
+            del lua_globals[k]
+    for v in lua_blacklist:
+        lua.execute("{}=nil".format(v))
+    for k,v in lua_overrides.items():
+        lua.execute("{}={}".format(k,v))
     g=lua_globals
     def to_id_map(data):
-        return {v.id:v for v in data}
+        return lua.table_from({v.id:v for v in data})
     def timeout(message):
         raise TimeoutError(message)
+    def import_filter(module,function=None):
+        if not module in python_whitelist:
+            raise AttributeError("Access denied: {}".format(module))
+        imp_path=".".join([module,function or ""]).strip(".")
+        if imp_path in python_blacklist:
+            raise AttributeError("Access denied: {}".format(imp_path))
+        if function and not function.startswith("_"):
+            return getattr(importlib.import_module(module),function)
+        elif function:
+            raise AttributeError("Access denied: {}".format(function))
+        return importlib.import_module(module)
     g_upd={
+        #'python':import_filter("builtins"),
+        'register_command':parser.register_command,
+        'py_import':import_filter,
         'int':int,
         'int_s':lambda v:str(int(v)),
         'format':lambda s,*f:s.format(*f),
         'timeout':timeout,
-        'template':lambda s:eval_template(parser,s,parser.vessel),
-        'parser':parser,
-        'parser_cls':type(parser),
+        'template':lambda s,kwargs={}:eval_template(parser,s,parser.vessel,**kwargs),
         'cmd':lambda *cmds:parser.script(*cmds,silent=False),
         'py_print':print,
-        'vessel':parser.vessel,
+        'vessel':parser.vessel or Ghost(),
         'location':((lambda:parser.vessel.parent) if parser.vessel else (lambda:parser.location))(),
         'universe':to_id_map(Vessel.universe),
         'atlas':to_id_map(Vessel.atlas),
         'spells':to_id_map(Vessel.spells),
         'tunnels':to_id_map(Vessel.tunnels),
-        'time':Clock().as_dict(),
-        'nataniev':lambda tz:Clock(tz).as_dict(),
-        'find':lambda id_n:Vessel.find_distant(id_n),
+        'time':lua.table(Clock().as_dict()),
+        'nataniev':lambda tz:lua.table(Clock(tz).as_dict()),
+        'find_vessel':lambda id_n:Vessel.find_distant(id_n),
     }
+    g_upd.update(kwargs)
     for k,v in g_upd.items():
         g[k]=v
-    err=False
     try:
-        res=lua.execute(code)
+        return False,lua.execute(code)
     except Exception as e:
-        res=e
-        err=True
-    return err,res
+        return True,e
 def init_lua():
     def lua_getter(obj,attr):
-        if attr.startswith("_"):
-            raise AttributeError("not allowed to read attribute {}".format(attr))
-        return getattr(obj,attr)
+        if isinstance(attr,str):
+            if attr.startswith("_") and attr.endswith("_"):
+                raise AttributeError("not allowed to read attribute {}".format(attr))
+            if getattr(obj,"__name__",None)!=None:
+                if "{}.{}".format(obj.__name__,attr) in python_blacklist:
+                    if getattr(obj,attr)!=None:
+                        raise AttributeError("not allowed to read attribute {}.{}".format(obj.__name__,attr))
+            return getattr(obj,attr)
+        return obj[attr]
     def lua_setter(obj, attr, value):
+        print("SET",obj,attr,"->",value)
         if isinstance(obj,Vessel):
             if attr in obj.cols:
-                return obj.__setattr__(attr,value)
-        if isinstance(obj,CmdParser):
-            if attr.startswith("do_"):
                 return obj.__setattr__(attr,value)
         raise AttributeError("not allowed to write attribute {}".format(attr))
     lupa_config={
@@ -1004,13 +1196,16 @@ def init_lua():
     }
     lua=lupa.LuaRuntime(**lupa_config)
     debug=lua.require("debug")
-    debug.sethook(lua.compile("timeout('Lua code execution timed out')"),"",LUA_LIMIT)
+    debug.sethook(lua.compile("timeout('Quota exceeded: {} instructions')".format(LUA_LIMIT)),"",LUA_LIMIT)
     lua_globals=lua.globals()
-    allowed=['math','table','type','ipairs','error','tostring','unpack','print']
     for k in lua_globals:
-        if k in allowed:
+        if k in lua_whitelist:
             continue
         del lua_globals[k]
+    for v in lua_blacklist:
+        lua.execute("{}=nil".format(v))
+    for k,v in lua_overrides.items():
+        lua.execute("{}={}".format(k,v))
     return lua,lua_globals
 if __name__=="__main__":
     if has_lua:
@@ -1018,10 +1213,13 @@ if __name__=="__main__":
     if args.test or args.do_import:
         import import_snapshot
     if args.empty:
-        Vessel.metadata.drop_all(engine)
-        Vessel.metadata.create_all(engine)
         Forum.metadata.drop_all(engine)
+        Vessel.metadata.drop_all(engine)
+        User.metadata.drop_all(engine)
+        
         Forum.metadata.create_all(engine)
+        Vessel.metadata.create_all(engine)
+        User.metadata.create_all(engine)
         Vessel( # create root vessel
             id=0,
             attr="central",
