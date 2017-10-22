@@ -5,11 +5,17 @@ from sqlalchemy.schema import ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy import Column, Integer, String, DateTime, Boolean
+import sqlalchemy.exc
 from datetime import datetime
 import random
 import jinja2
 import os
 from date_time import Clock
+import hashlib
+import binascii
+
+import traceback
+
 class InvalidVesselException(Exception):
     pass
 class Ghost(object):
@@ -34,6 +40,7 @@ def clean_vessel_name(value):
         if value.startswith("{} ".format(w)):
             value=value[len(w)+1:]
     return value.strip()
+
 def split_vessel_name(value):
     if value:
         *attr,name=clean_vessel_name(value).split()
@@ -48,6 +55,47 @@ class ClassProperty(property):
     def __get__(self, cls, owner):
         return self.fget.__get__(None, owner)()
 
+class User(Base):
+    __tablename__="users"
+    id = Column(Integer,primary_key=True)
+    username = Column(String,unique=True,nullable=False)
+    vessel_id = Column(Integer,ForeignKey('vessels.id'),nullable=True)
+    __password__ = Column('password',String,nullable=False)
+    
+    def __init__(self,username,password):
+        self.username=username
+        super().__init__()
+        self.__password__=self.hash_pw(password)
+        session.add(self)
+        try:
+            session.commit()
+        except sqlalchemy.exc.IntegrityError:
+            session.rollback()
+            print("Error: usernames already in use")
+    
+    @classmethod
+    def get(cls,username=None,uid=None):
+        if not (username is None)^(uid is None):
+            raise Exception("Either Username or User-ID hash to be supplied")
+        if username is not None:
+            return session.query(cls).filter(User.username==username).one_or_none()
+        if uid is not None:
+            return session.query(cls).filter(User.id==uid).one_or_none()
+    
+    @property
+    def vessel(self):
+        return Vessel.get(self.vessel_id)
+    
+    def hash_pw(self,password):
+        return binascii.hexlify(hashlib.pbkdf2_hmac('sha256',bytes(password,'utf-8'),bytes(self.username,'utf-8'),1024*64))
+
+    def verify(self,password):
+        return self.hash_pw(password)==self.__password__
+    
+    @classmethod
+    def register(cls,username,password):
+        return cls(username,password)
+        
 class Forum(Base):
     __tablename__ = "forum"
     id = Column(Integer,primary_key=True)
@@ -234,6 +282,8 @@ class Vessel(Base):
     
     @property
     def children(self):
+        #print("C")
+        #traceback.print_stack()
         query=(
             (Vessel.parent_id==self.id) & \
             (Vessel.id != self.id) & \
@@ -246,6 +296,8 @@ class Vessel(Base):
     
     @property
     def siblings(self):
+        #print("S")
+        #traceback.print_stack()
         query=(
             (Vessel.parent_id==self.parent_id) & \
             (Vessel.id != self.parent_id) & \
@@ -377,7 +429,7 @@ class Vessel(Base):
         cols['parent']=self.parent
         cols['owner']=self.owner
         cols['children']=self.children.all()
-        cols['num_children_']=len(cols['children'])
+        cols['num_children']=len(cols['children'])
         cols['siblings']=self.siblings.all()
         cols['num_siblings']=len(cols['siblings'])
         cols['visible']=self.visible
@@ -404,10 +456,10 @@ class Vessel(Base):
     @property
     def rating(self):
         values=[
-            self.note.strip()!="",
+            self.raw_note.strip()!="",
             self.attr.strip()!="",
             self.program.strip()!="",
-            self.children.all(),
+            self.children.count(),
             self.paradox,
             self.locked,
             self.hidden,
