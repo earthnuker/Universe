@@ -947,8 +947,16 @@ class Cmd_Parser(cmd.Cmd):
     
     def do_register(self,args):
         username=args
-        password=getpass.getpass()
-        password_v=getpass.getpass("Verify Passowrd:")
+        print("Warning: Password input may be echoed.")
+        
+        if self.conninfo:
+            print("Warning: Password input may be echoed.")
+            password=input("Password:")
+            password_v=input("Verify Password:")
+        else:
+            password=getpass.getpass(stream=sys.stdout)
+            password_v=getpass.getpass("Verify Password:",stream=sys.stdout)
+        
         if password!=password_v:
             print("Passwords do not match")
             return
@@ -957,9 +965,21 @@ class Cmd_Parser(cmd.Cmd):
             self.user.vessel_id=self.vessel.id
             Vessel.commit()
     
+    def do_logout(self,args):
+        if args:
+            print("logout takes no arguments")
+            return
+        self.user=None
+        if self.vessel:
+            self.vessel=None
+    
     def do_login(self,args):
         username=args
-        password=getpass.getpass()
+        if self.conninfo:
+            print("Warning: Password input may be echoed.")
+            password=input("Password:")
+        else:
+            password=getpass.getpass(stream=sys.stdout)
         user=User.get(username)
         if not user:
             print("User does not exist")
