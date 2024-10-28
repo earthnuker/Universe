@@ -1,6 +1,6 @@
 jinja2==2.9.6
 python-dateutil==2.6.1
-sqlalchemy==1.1.13
+sqlalchemy==1.2.19
 tqdm==4.15.0
 pyreadline==2.1
 lupa==1.5
